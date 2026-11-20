@@ -121,7 +121,7 @@ vi.mock("tedious", async (importOriginal) => {
     callProcedure(request: MockRequest) {
       this.queries.push(request.sql)
       request.listeners.returnValue("answer", 42)
-      request.callback(null, 0, [])
+      request.callback(null, 1, [[{ metadata: { colName: "value" }, value: 42 }]])
     }
 
     beginTransaction(callback: (cause: unknown) => void) {
@@ -149,6 +149,11 @@ vi.mock("tedious", async (importOriginal) => {
 })
 
 const sql = Statement.make(Effect.void as any, MssqlClient.makeCompiler(), [], undefined)
+const getAnswerProcedure = Procedure.make("get_answer").pipe(
+  Procedure.outputParam<number>()("answer", state.type as any),
+  Procedure.withRows(),
+  Procedure.compile
+)({})
 
 describe("mssql", () => {
   it("preserves fractional JavaScript numbers with the default parameter mapping", () => {
@@ -337,10 +342,9 @@ describe("mssql", () => {
   it.effect("returns stored procedure output parameters under output", () =>
     Effect.gen(function*() {
       const client = yield* MssqlClient.make({ server: "localhost" })
-      const definition = Procedure.outputParam<number>()("answer", state.type as any)(Procedure.make("get_answer"))
-      const result = yield* client.call(Procedure.compile(definition)({}))
+      const result = yield* client.call(getAnswerProcedure)
 
-      assert.deepStrictEqual(result, { output: { answer: 42 }, rows: [] })
+      assert.deepStrictEqual(result, { output: { answer: 42 }, rows: [{ value: 42 }] })
     }).pipe(
       Effect.scoped,
       Effect.provide(Reactivity.layer)
@@ -394,14 +398,15 @@ describe("MssqlClient connection lifecycle", { concurrent: false }, () => {
           maxConnections: 1,
           transformResultNames: (name) => name.toUpperCase()
         }))
-        const definition = Procedure.outputParam<number>()("answer", state.type as any)(Procedure.make("get_answer"))
         yield* bounded(client.withTransaction(Effect.gen(function*() {
           if (operation === "withoutTransforms") {
             const rows = yield* client.withoutTransforms()`SELECT value`
             assert.deepStrictEqual(rows, [{ value: 42 }])
           } else {
-            const result = yield* client.call(Procedure.compile(definition)({}))
-            assert.deepStrictEqual(result, { output: { answer: 42 }, rows: [] })
+            const result = yield* client.call(getAnswerProcedure)
+            assert.deepStrictEqual(result, { output: { answer: 42 }, rows: [{ VALUE: 42 }] })
+            const untransformed = yield* client.withoutTransforms().call(getAnswerProcedure)
+            assert.deepStrictEqual(untransformed, { output: { answer: 42 }, rows: [{ value: 42 }] })
           }
         })))
       }).pipe(Effect.provide(Reactivity.layer)))
@@ -411,12 +416,11 @@ describe("MssqlClient connection lifecycle", { concurrent: false }, () => {
     Effect.gen(function*() {
       reset()
       const client = yield* bounded(makeClient)
-      const definition = Procedure.outputParam<number>()("answer", state.type as any)(Procedure.make("get_answer"))
       const go = yield* Deferred.make<void>()
       const stale = yield* bounded(client.withTransaction(Effect.forkDetach(Effect.andThen(
         Deferred.await(go),
         Effect.all([
-          Effect.flip(client.call(Procedure.compile(definition)({}))),
+          Effect.flip(client.call(getAnswerProcedure)),
           Effect.flip(client.withoutTransforms()`SELECT 'stale'`)
         ])
       ))))
