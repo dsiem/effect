@@ -4,7 +4,7 @@
 
 Base: `cab7f2e3493e4a3dceda27cb1b6d28c4599cb939` (`cab7f2e3493e4a3dceda27cb1b6d28c4599cb939`)
 
-Head: `3d13d1e84a933bfd4b90952ad9a221728326e923` (`3d13d1e84a933bfd4b90952ad9a221728326e923`)
+Head: `579e191f4561ff7febc72c114e948dd78feb88c0` (`579e191f4561ff7febc72c114e948dd78feb88c0`)
 
 This file is generated from the API diff and `migration/annotations/*.yaml`.
 
@@ -5425,6 +5425,8 @@ effect/rpc/Utils (barrel: effect/rpc)
 
 - `CliApp.CliApp.ConstructorArgs` -> `none`: Build the command with Command.make and withDescription, then pass version to Command.run; the old app constructor shape was removed.
 
+- `CliApp.CliApp.Environment`: TODO: needs guidance
+
 - `CliApp.make` -> `Command.make`: Build the executable Command directly; there is no separate CliApp wrapper.
 
 - `CliApp.run` -> `Command.run`: The CliApp wrapper was removed. Attach the execute function with Command.withHandler, then run the Command with its version; v4 reads arguments through the CLI environment instead of accepting args and execute at this call.
@@ -6130,6 +6132,8 @@ effect/rpc/Utils (barrel: effect/rpc)
 - `EventLog.Handlers` -> `effect/eventlog/EventLog#Handlers`: Import Handlers from the v4 EventLog module; handlers now also receive storeId. Remote decode or handler failures leave the entire batch uncommitted and retry it after backoff instead of logging and committing past the failure. Replay handlers must tolerate repeated execution. Conflicts are stored entries with strictly greater ids, in id order; compacted replacements use their source entry as the conflict anchor.
 
 - `EventLog.HandlersTypeId` -> `effect/eventlog/EventLog#HandlersTypeId`: Import HandlersTypeId from the v4 EventLog module.
+
+- `EventLog.Registry`: TODO: needs guidance
 
 - `EventLog.SchemaTypeId` -> `effect/eventlog/EventLog#SchemaTypeId`: Import SchemaTypeId from the v4 EventLog module.
 
@@ -7026,6 +7030,8 @@ effect/rpc/Utils (barrel: effect/rpc)
 - `HttpApiError.HttpApiDecodeError` -> `effect/http-api/HttpApiError#HttpApiSchemaError`: Validation now stores kind and a SchemaError cause and is a defect unless transformed by schema-error middleware.
 
 - `HttpApiError.Issue` -> `effect/SchemaIssue#Issue`: Structured failures now live at HttpApiSchemaError.cause.issue; format them explicitly when a flat external list is needed.
+
+- `HttpApiError.NotFound`: TODO: needs guidance
 
 - `HttpApiError.TypeId` -> `effect/http-api/HttpApiError#HttpApiSchemaErrorTypeId`: The old module symbol is gone; prefer HttpApiSchemaError.is for runtime narrowing.
 
@@ -8373,7 +8379,9 @@ effect/rpc/Utils (barrel: effect/rpc)
 
 ### `@effect/sql/Statement`
 
-- `Statement.Constructor` -> `effect/sql/Statement#Constructor`: Moved to core Effect. sql.updateValues now escapes its alias as an identifier without applying name transforms; pass a bare alias such as "data" rather than pre-quoted SQL, and quote mixed-case PostgreSQL aliases where the query references them. sql.insert and sql.updateValues now require a non-empty array of rows; narrow array inputs with Array.isReadonlyArrayNonEmpty first.
+- `Statement.Constructor` -> `effect/sql/Statement#Constructor`: Moved to core Effect. Replace sql.onDialect and sql.onDialectOrElse with sql.matchDialect, passing a list of [dialect, callback] pairs and a fallback that receives the unmatched dialect. Hand-written constructors must expose their compiler's dialect. sql.updateValues now escapes its alias as an identifier without applying name transforms; pass a bare alias such as "data" rather than pre-quoted SQL, and quote mixed-case PostgreSQL aliases where the query references them. sql.insert and sql.updateValues now require a non-empty array of rows; narrow array inputs with Array.isReadonlyArrayNonEmpty first.
+
+- `Statement.Dialect` -> `effect/sql/Statement#Dialect`: Includes third-party dialect strings. Add a default branch to switches that covered only the built-in dialects.
 
 - `Statement.Fragment` -> `effect/sql/Statement#Fragment`: Moved with the same segments field, but the brand key is now Statement.FragmentTypeId and its value is the symbol itself rather than a function. Build fragments with the sql template or Statement.fragment and check them with Statement.isFragment; sql interpolation binds unbranded objects as parameters.
 
@@ -9222,6 +9230,8 @@ Arbitrary.schema(schema)
 - `Brand.all` -> `Brand.all`: Still exported; combines multiple brand constructors and checks.
 
 - `Brand.error` -> `Brand.make`: Return a string or Schema filter issue directly from a Brand.make validator.
+
+- `Brand.errors`: TODO: needs guidance
 
 - `Brand.nominal` -> `Brand.nominal`: Still exported; the constructor's either method is now result.
 
@@ -10824,8 +10834,6 @@ Arbitrary.schema(schema)
 - `FastCheck.BigUintConstraints` -> `FastCheck.BigIntConstraints`: Depend on fast-check and import it directly. Unsigned bigint constraints were consolidated into BigIntConstraints with min: 0n.
 
 - `FastCheck.CloneValue`: TODO: needs guidance
-
-- `FastCheck.Command`: TODO: needs guidance
 
 - `FastCheck.CommandsContraints`: TODO: needs guidance
 
