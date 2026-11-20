@@ -14,6 +14,7 @@ import * as Context from "../Context.ts"
 import * as Effect from "../Effect.ts"
 import * as Exit from "../Exit.ts"
 import { identity } from "../Function.ts"
+import { assignProperty, ownEnumerableKeys } from "../internal/record.ts"
 import { CurrentTransactionService, recordConnectionWait, waitClock } from "../internal/sql.ts"
 import * as Option from "../Option.ts"
 import { hasProperty } from "../Predicate.ts"
@@ -67,9 +68,8 @@ export interface Base extends Constructor {
    * **Details**
    *
    * Effect drivers use their package name without the `@effect/sql-` prefix,
-   * such as `"pg"`, `"pglite"` or `"sqlite-node"`. Unlike the compiler
-   * dialect, it distinguishes drivers that share a SQL dialect but manage
-   * connections differently.
+   * such as `"pg"`, `"pglite"` or `"sqlite-node"`. The `"pg"` and
+   * `"pglite"` drivers both report `"pg"` through `sql.dialect`.
    */
   readonly driver: string
 
@@ -391,17 +391,18 @@ export const make = Effect.fnUntraced(function*(options: SqlClient.MakeOptions) 
       reserve: transactionAcquirer,
       driver: options.driver,
       withoutTransforms(): any {
-        const statement = Statement.make(
+        const client = Statement.make(
           getConnection,
           options.compiler.withoutTransform,
           options.spanAttributes,
           undefined,
           borrower
         )
-        const client = Object.assign(statement, {
-          ...this,
-          ...statement
-        })
+        for (const key of ownEnumerableKeys(this)) {
+          if (!Object.hasOwn(client, key)) {
+            assignProperty(client, key, Reflect.get(this, key))
+          }
+        }
         ;(client as any).safe = client
         ;(client as any).withoutTransforms = () => client
         return client

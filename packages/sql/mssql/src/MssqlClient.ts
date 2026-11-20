@@ -656,15 +656,17 @@ export const make = (
       rollbackSavepoint: (conn, id) => conn.rollback(`effect_sql_${id}`)
     })
 
+    const base = yield* Client.make({
+      driver: "mssql",
+      acquirer: acquireConnection,
+      compiler,
+      transactionService: transactionService as any,
+      spanAttributes,
+      transformRows
+    })
+    const withoutTransforms = base.withoutTransforms
     return identity<MssqlClient & Client.SqlClient>(Object.assign(
-      yield* Client.make({
-        driver: "mssql",
-        acquirer: acquireConnection,
-        compiler,
-        transactionService: transactionService as any,
-        spanAttributes,
-        transformRows
-      }),
+      base,
       {
         [TypeId]: TypeId as TypeId,
         config: options,
@@ -682,11 +684,8 @@ export const make = (
           procedure: Procedure.ProcedureWithValues<I, O, A>
         ) => Effect.scoped(Effect.flatMap(getConnection, (_) => _.call(procedure, transformRows))),
         withoutTransforms() {
-          const statement = Statement.make(getConnection, compiler.withoutTransform, spanAttributes, undefined)
-          const client = Object.assign(
-            statement,
-            this,
-            statement,
+          return Object.assign(
+            withoutTransforms.call(this),
             {
               call: <
                 I extends Record<string, Parameter<any>>,
@@ -697,9 +696,6 @@ export const make = (
               ) => Effect.scoped(Effect.flatMap(getConnection, (_) => _.call(procedure, undefined)))
             }
           )
-          ;(client as any).safe = client
-          ;(client as any).withoutTransforms = () => client
-          return client
         }
       }
     ))

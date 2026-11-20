@@ -92,13 +92,19 @@ export const fragment = (
 })
 
 /**
- * Supported SQL dialect identifiers used by statement compilers.
+ * SQL syntax families used by statement compilers, including names supplied
+ * by third-party drivers. Use the same dialect for clients that follow the
+ * same SQL syntax, such as `"pg"` for PostgreSQL-compatible clients.
  *
  * @stability unstable
  * @category models
  * @since 4.0.0
  */
-export type Dialect = "sqlite" | "pg" | "mysql" | "mssql" | "clickhouse"
+export type Dialect = BuiltinDialect | (string & {})
+
+const builtinDialects = { sqlite: true, pg: true, mysql: true, mssql: true, clickhouse: true }
+type BuiltinDialect = keyof typeof builtinDialects
+const isBuiltinDialect = (dialect: Dialect): dialect is BuiltinDialect => Object.hasOwn(builtinDialects, dialect)
 
 /**
  * Executable SQL statement that is also a `Fragment` and `Effect`, with helpers
@@ -610,6 +616,15 @@ export interface Constructor {
     fallback?: string
   ) => (clauses: ReadonlyArray<string | Fragment>) => Fragment
 
+  /**
+   * SQL dialect used by this constructor's compiler, including third-party dialect names.
+   */
+  readonly dialect: Dialect
+
+  /**
+   * Runs the branch for one of Effect's built-in SQL dialects. Throws for
+   * custom dialects. Use `onDialectOrElse` to select a custom branch.
+   */
   readonly onDialect: <A, B, C, D, E>(options: {
     readonly sqlite: () => A
     readonly pg: () => B
@@ -618,6 +633,12 @@ export interface Constructor {
     readonly clickhouse: () => E
   }) => A | B | C | D | E
 
+  /**
+   * Runs the matching built-in dialect branch, or calls `orElse` with no
+   * arguments. Read `sql.dialect` inside `orElse` to handle third-party dialects.
+   * Keep supplied built-in branches in the case object's type so their
+   * return types are included in the result.
+   */
   readonly onDialectOrElse: <A, B = never, C = never, D = never, E = never, F = never>(options: {
     readonly orElse: () => A
     readonly sqlite?: () => B
@@ -643,24 +664,42 @@ export const make = (
   transformRows: (<A extends object>(row: ReadonlyArray<A>) => ReadonlyArray<A>) | undefined,
   borrower?: Borrower | undefined
 ): Constructor => {
-  const self: Constructor = Object.assign(
-    function sql(strings: unknown, ...args: Array<any>): any {
-      if (typeof strings === "string") {
-        return identifier(strings)
-      } else if (Array.isArray(strings) && "raw" in strings) {
-        return makeUnsafe(
-          templateSegments(strings as TemplateStringsArray, args),
-          acquirer,
-          compiler,
-          spanAttributes,
-          transformRows,
-          borrower,
-          self
-        )
-      }
+  const onDialect: Constructor["onDialect"] = (options) => {
+    const { dialect } = compiler
+    if (!isBuiltinDialect(dialect)) {
+      throw new Error(`No SQL branch for dialect "${dialect}". Use onDialectOrElse to provide a fallback.`)
+    }
+    return options[dialect]()
+  }
+  const onDialectOrElse: Constructor["onDialectOrElse"] = (options) => {
+    const { dialect } = compiler
+    const branch = isBuiltinDialect(dialect) ? options[dialect] : undefined
+    return branch !== undefined ? Reflect.apply(branch, options, []) : options.orElse()
+  }
+  function sql(strings: unknown, ...args: Array<any>): any {
+    if (typeof strings === "string") {
+      return identifier(strings)
+    } else if (Array.isArray(strings) && "raw" in strings) {
+      return makeUnsafe(
+        templateSegments(strings as TemplateStringsArray, args),
+        acquirer,
+        compiler,
+        spanAttributes,
+        transformRows,
+        borrower,
+        self
+      )
+    }
 
-      throw "absurd"
-    },
+    throw "absurd"
+  }
+  const withDialect = Object.defineProperty(sql, "dialect", {
+    configurable: true,
+    enumerable: true,
+    get: () => compiler.dialect
+  }) as typeof sql & Pick<Constructor, "dialect">
+  const self: Constructor = Object.assign(
+    withDialect,
     {
       unsafe<A extends object = Row>(
         sql: string,
@@ -695,12 +734,8 @@ export const make = (
       or,
       csv,
       join,
-      onDialect(options: Record<Dialect, any>) {
-        return options[compiler.dialect]()
-      },
-      onDialectOrElse(options: any) {
-        return options[compiler.dialect] !== undefined ? options[compiler.dialect]() : options.orElse()
-      }
+      onDialect,
+      onDialectOrElse
     }
   )
 
