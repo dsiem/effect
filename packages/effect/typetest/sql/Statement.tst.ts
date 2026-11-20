@@ -9,31 +9,38 @@ declare const plainFragment: {
 }
 
 describe("Statement", () => {
-  it("onDialectOrElse preserves contextual callback types and explicit result types", () => {
-    const size: (text: string) => number = sql.onDialectOrElse({
-      orElse: () => (text) => text.length
-    })
+  it("matchDialect preserves contextual callback types and generic results", () => {
+    const size: (text: string) => number = sql.matchDialect(
+      [["pg", () => (text) => text.length]],
+      () => (text) => text.length
+    )
     expect(size).type.toBe<(text: string) => number>()
-    expect(sql.onDialectOrElse<number>({ orElse: () => 0 })).type.toBe<number>()
-    const result = sql.onDialectOrElse({ orElse: () => 0, sqlite: () => "" })
-    expect(result).type.toBe<number | string>()
-    const select = <A>(branch: () => A): A => sql.onDialectOrElse({ orElse: branch, pg: branch })
+    const select = <A>(branch: () => A): A => sql.matchDialect([["pg", branch]], branch)
     expect(select(() => 1)).type.toBe<number>()
   })
 
-  it("infers custom results from the fallback and built-in results from named branches", () => {
-    const result = sql.onDialectOrElse({
-      pg: () => true,
-      orElse: () => sql.dialect === "spark" ? 1 : "fallback"
+  it("infers built-in, custom and fallback results", () => {
+    const result = sql.matchDialect([
+      ["pg", () => true],
+      ["spark", () => "warehouse"]
+    ], (dialect) => {
+      expect(dialect).type.toBe<Statement.Dialect>()
+      return 0
     })
-    expect(result).type.toBe<boolean | 1 | "fallback">()
+    expect(result).type.toBe<boolean | string | number>()
     expect(sql.dialect).type.toBe<Statement.Dialect>()
-    expect(sql.onDialectOrElse).type.not.toBeCallableWith({ orElse: (dialect: Statement.Dialect) => dialect })
-    const extra = { spark: () => "warehouse", orElse: () => 0 }
-    const narrowed: { orElse: () => number } = extra
-    const fallback = sql.onDialectOrElse(narrowed)
-    expect(fallback).type.toBe<number>()
-    expect(sql.onDialectOrElse).type.not.toBeCallableWith({ pg: () => "postgres" })
+    expect(sql.matchDialect).type.not.toBeCallableWith([["pg", () => true]] as const)
+  })
+
+  it("cannot hide cases from the inferred result", () => {
+    const cases = [["pg", () => "postgres"]] as const
+    const widened: ReadonlyArray<readonly [Statement.Dialect, () => string]> = cases
+    const result = sql.matchDialect(widened, () => 0)
+    expect(result).type.toBe<string | number>()
+    expect(cases).type.not.toBeAssignableTo<readonly []>()
+    const options = { pg: () => "postgres", orElse: () => 0 }
+    const narrowed: { orElse: () => number } = options
+    expect(sql.matchDialect).type.not.toBeCallableWith(narrowed, narrowed.orElse)
   })
 
   it("insert requires non-empty rows or a single record", () => {

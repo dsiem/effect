@@ -334,34 +334,35 @@ export const layerBackingSqlMultiTable: Layer.Layer<
       const clock = yield* Clock.Clock
       const tableName = `effect_persistence_${storeId}`
       const table = sql(tableName)
-      yield* sql.onDialectOrElse({
-        mysql: () =>
-          sql`
+      yield* sql.matchDialect(
+        [
+          ["mysql", () =>
+            sql`
             CREATE TABLE IF NOT EXISTS ${table} (
               id VARCHAR(191) PRIMARY KEY,
               value TEXT NOT NULL,
               expires BIGINT
             )
-          `,
-        pg: () =>
-          sql`
+          `],
+          ["pg", () =>
+            sql`
             CREATE TABLE IF NOT EXISTS ${table} (
               id TEXT PRIMARY KEY,
               value TEXT NOT NULL,
               expires BIGINT
             )
-          `,
-        mssql: () =>
-          sql`
+          `],
+          ["mssql", () =>
+            sql`
             IF NOT EXISTS (SELECT * FROM sysobjects WHERE name=${tableName} AND xtype='U')
             CREATE TABLE ${table} (
               id NVARCHAR(450) PRIMARY KEY,
               value NVARCHAR(MAX) NOT NULL,
               expires BIGINT
             )
-          `,
-        // sqlite
-        orElse: () =>
+          `]
+        ], // sqlite
+        () =>
           sql`
             CREATE TABLE IF NOT EXISTS ${table} (
               id TEXT PRIMARY KEY,
@@ -369,7 +370,7 @@ export const layerBackingSqlMultiTable: Layer.Layer<
               expires INTEGER
             )
           `
-      }).pipe(Effect.orDie)
+      ).pipe(Effect.orDie)
 
       // Cleanup expired entries on startup
       yield* Effect.ignore(
@@ -380,22 +381,23 @@ export const layerBackingSqlMultiTable: Layer.Layer<
         entries: Arr.NonEmptyReadonlyArray<{ id: string; value: string; expires: number | null }>
       ) => Effect.Effect<unknown, SqlError>
 
-      const upsert = sql.onDialectOrElse({
-        pg: (): UpsertFn => (entries) =>
-          sql`
+      const upsert = sql.matchDialect(
+        [
+          ["pg", (): UpsertFn => (entries) =>
+            sql`
             INSERT INTO ${table} ${sql.insert(entries)}
             ON CONFLICT (id) DO UPDATE SET value=EXCLUDED.value, expires=EXCLUDED.expires
-          `.unprepared,
-        mysql: (): UpsertFn => (entries) =>
-          sql`
+          `.unprepared],
+          ["mysql", (): UpsertFn => (entries) =>
+            sql`
             INSERT INTO ${table} ${sql.insert(entries)}
             ON DUPLICATE KEY UPDATE value=VALUES(value), expires=VALUES(expires)
-          `.unprepared,
-        mssql: (): UpsertFn => (entries) =>
-          Effect.forEach(
-            entries,
-            (entry) =>
-              sql`
+          `.unprepared],
+          ["mssql", (): UpsertFn => (entries) =>
+            Effect.forEach(
+              entries,
+              (entry) =>
+                sql`
                 MERGE ${table} AS target
                 USING (SELECT ${entry.id} AS id, ${entry.value} AS value, ${entry.expires} AS expires) AS source
                 ON target.id = source.id
@@ -403,15 +405,15 @@ export const layerBackingSqlMultiTable: Layer.Layer<
                 WHEN NOT MATCHED THEN INSERT (id, value, expires)
                 VALUES (source.id, source.value, source.expires);
               `,
-            { discard: true }
-          ),
-        // sqlite
-        orElse: (): UpsertFn => (entries) =>
+              { discard: true }
+            )]
+        ], // sqlite
+        (): UpsertFn => (entries) =>
           sql`
             INSERT INTO ${table} ${sql.insert(entries)}
             ON CONFLICT(id) DO UPDATE SET value=excluded.value, expires=excluded.expires
           `.unprepared
-      })
+      )
 
       return identity<BackingPersistenceStore>({
         get: (key) =>
@@ -558,9 +560,10 @@ export const layerBackingSql: Layer.Layer<
 > = Layer.effect(BackingPersistence)(Effect.gen(function*() {
   const sql = (yield* SqlClient.SqlClient).withoutTransforms()
   const table = sql("effect_persistence")
-  yield* sql.onDialectOrElse({
-    mysql: () =>
-      sql`
+  yield* sql.matchDialect(
+    [
+      ["mysql", () =>
+        sql`
         CREATE TABLE IF NOT EXISTS ${table} (
           store_id VARCHAR(191) NOT NULL,
           id VARCHAR(191) NOT NULL,
@@ -568,9 +571,9 @@ export const layerBackingSql: Layer.Layer<
           expires BIGINT,
           PRIMARY KEY (store_id, id)
         )
-      `,
-    pg: () =>
-      sql`
+      `],
+      ["pg", () =>
+        sql`
         CREATE TABLE IF NOT EXISTS ${table} (
           store_id TEXT NOT NULL,
           id TEXT NOT NULL,
@@ -578,9 +581,9 @@ export const layerBackingSql: Layer.Layer<
           expires BIGINT,
           PRIMARY KEY (store_id, id)
         )
-      `,
-    mssql: () =>
-      sql`
+      `],
+      ["mssql", () =>
+        sql`
         IF NOT EXISTS (SELECT * FROM sysobjects WHERE name=${"effect_persistence"} AND xtype='U')
         CREATE TABLE ${table} (
           store_id NVARCHAR(191) NOT NULL,
@@ -589,9 +592,9 @@ export const layerBackingSql: Layer.Layer<
           expires BIGINT,
           PRIMARY KEY (store_id, id)
         )
-      `,
-    // sqlite
-    orElse: () =>
+      `]
+    ], // sqlite
+    () =>
       sql`
         CREATE TABLE IF NOT EXISTS ${table} (
           store_id TEXT NOT NULL,
@@ -601,51 +604,62 @@ export const layerBackingSql: Layer.Layer<
           PRIMARY KEY (store_id, id)
         )
       `
-  }).pipe(Effect.orDie)
+  ).pipe(Effect.orDie)
 
-  yield* sql.onDialectOrElse({
-    pg: () =>
-      sql`CREATE INDEX IF NOT EXISTS effect_persistence_expires_idx ON ${table} (expires) WHERE expires IS NOT NULL`
-        .pipe(Effect.orDie, Effect.asVoid),
-    mysql: Effect.fnUntraced(function*() {
-      const indexExists = sql<{ readonly count: number }>`
+  yield* sql.matchDialect(
+    [
+      [
+        "pg",
+        () =>
+          sql`CREATE INDEX IF NOT EXISTS effect_persistence_expires_idx ON ${table} (expires) WHERE expires IS NOT NULL`
+            .pipe(Effect.orDie, Effect.asVoid)
+      ],
+      [
+        "mysql",
+        Effect.fnUntraced(function*() {
+          const indexExists = sql<{ readonly count: number }>`
           SELECT COUNT(*) AS count FROM information_schema.statistics
           WHERE table_schema = DATABASE()
             AND table_name = 'effect_persistence'
             AND index_name = 'effect_persistence_expires_idx'
         `.pipe(
-        Effect.map((rows) => Number(rows[0].count) > 0)
-      )
+            Effect.map((rows) => Number(rows[0].count) > 0)
+          )
 
-      yield* sql`CREATE INDEX effect_persistence_expires_idx ON ${table} (expires)`.pipe(
-        Effect.catch((error) => Effect.flatMap(indexExists, (exists) => exists ? Effect.void : Effect.fail(error)))
-      )
-    }, (_) => Effect.orDie(_)),
-    mssql: Effect.fnUntraced(function*() {
-      const indexExists = sql<{ readonly count: number }>`
+          yield* sql`CREATE INDEX effect_persistence_expires_idx ON ${table} (expires)`.pipe(
+            Effect.catch((error) => Effect.flatMap(indexExists, (exists) => exists ? Effect.void : Effect.fail(error)))
+          )
+        }, (_) => Effect.orDie(_))
+      ],
+      [
+        "mssql",
+        Effect.fnUntraced(function*() {
+          const indexExists = sql<{ readonly count: number }>`
           SELECT COUNT(*) AS count FROM sys.indexes
           WHERE name = N'effect_persistence_expires_idx'
             AND object_id = OBJECT_ID(N'effect_persistence')
         `.pipe(
-        Effect.map((rows) => Number(rows[0].count) > 0)
-      )
+            Effect.map((rows) => Number(rows[0].count) > 0)
+          )
 
-      yield* sql`CREATE INDEX effect_persistence_expires_idx ON ${table} (expires) WHERE expires IS NOT NULL`.pipe(
-        Effect.catch((error) => Effect.flatMap(indexExists, (exists) => exists ? Effect.void : Effect.fail(error)))
-      )
-    }, (_) => Effect.orDie(_)),
-    // sqlite
-    orElse: () =>
+          yield* sql`CREATE INDEX effect_persistence_expires_idx ON ${table} (expires) WHERE expires IS NOT NULL`.pipe(
+            Effect.catch((error) => Effect.flatMap(indexExists, (exists) => exists ? Effect.void : Effect.fail(error)))
+          )
+        }, (_) => Effect.orDie(_))
+      ]
+    ], // sqlite
+    () =>
       sql`CREATE INDEX IF NOT EXISTS effect_persistence_expires_idx ON ${table} (expires) WHERE expires IS NOT NULL`
         .pipe(Effect.orDie, Effect.asVoid)
-  })
+  )
 
   const cleanupBatchDelay = Duration.millis(10)
   const cleanupInterval = Duration.minutes(5)
 
-  const deleteExpiredBatch = sql.onDialectOrElse({
-    pg: () => (expiresAtOrBefore: number) =>
-      sql<{ readonly count: number }>`
+  const deleteExpiredBatch = sql.matchDialect(
+    [
+      ["pg", () => (expiresAtOrBefore: number) =>
+        sql<{ readonly count: number }>`
         WITH deleted_entries AS (
           DELETE FROM ${table}
           WHERE ctid IN (
@@ -656,24 +670,24 @@ export const layerBackingSql: Layer.Layer<
           RETURNING 1
         )
         SELECT COUNT(*)::INT AS count FROM deleted_entries
-      `.pipe(Effect.map((rows) => rows[0].count)),
-    mysql: () =>
-      Effect.fnUntraced(
-        function*(expiresAtOrBefore: number) {
-          const connection = yield* sql.reserve
-          const [statement, parameters] = sql`
+      `.pipe(Effect.map((rows) => rows[0].count))],
+      ["mysql", () =>
+        Effect.fnUntraced(
+          function*(expiresAtOrBefore: number) {
+            const connection = yield* sql.reserve
+            const [statement, parameters] = sql`
             DELETE FROM ${table}
             WHERE expires IS NOT NULL AND expires <= ${expiresAtOrBefore}
             LIMIT ${sql.literal(String(sqlCleanupBatchSize))}
           `.compile()
-          yield* connection.execute(statement, parameters, undefined)
-          const rows = yield* connection.executeValues("SELECT ROW_COUNT()", [])
-          return Number(rows[0][0])
-        },
-        Effect.scoped
-      ),
-    mssql: () => (expiresAtOrBefore: number) =>
-      sql<{ readonly store_id: string }>`
+            yield* connection.execute(statement, parameters, undefined)
+            const rows = yield* connection.executeValues("SELECT ROW_COUNT()", [])
+            return Number(rows[0][0])
+          },
+          Effect.scoped
+        )],
+      ["mssql", () => (expiresAtOrBefore: number) =>
+        sql<{ readonly store_id: string }>`
         WITH expired_entries AS (
           SELECT TOP ${sql.literal(String(sqlCleanupBatchSize))} store_id, id FROM ${table}
           WITH (UPDLOCK, READPAST, READCOMMITTEDLOCK)
@@ -685,9 +699,9 @@ export const layerBackingSql: Layer.Layer<
         INNER JOIN expired_entries
           ON persistence.store_id = expired_entries.store_id
           AND persistence.id = expired_entries.id
-      `.pipe(Effect.map((deletedEntries) => deletedEntries.length)),
-    // Some sqlite clients do not support interactive transactions, so use one bounded statement.
-    orElse: () => (expiresAtOrBefore: number) =>
+      `.pipe(Effect.map((deletedEntries) => deletedEntries.length))]
+    ], // Some sqlite clients do not support interactive transactions, so use one bounded statement.
+    () => (expiresAtOrBefore: number) =>
       sql<{ readonly deleted: number }>`
         DELETE FROM ${table}
         WHERE rowid IN (
@@ -697,7 +711,7 @@ export const layerBackingSql: Layer.Layer<
         )
         RETURNING 1 AS deleted
       `.pipe(Effect.map((deletedEntries) => deletedEntries.length))
-  })
+  )
 
   const deleteExpired = Effect.gen(function*() {
     const expiresAtOrBefore = yield* Clock.currentTimeMillis
@@ -719,22 +733,23 @@ export const layerBackingSql: Layer.Layer<
     entries: Arr.NonEmptyReadonlyArray<{ store_id: string; id: string; value: string; expires: number | null }>
   ) => Effect.Effect<unknown, SqlError>
 
-  const upsert = sql.onDialectOrElse({
-    pg: (): UpsertFn => (entries) =>
-      sql`
+  const upsert = sql.matchDialect(
+    [
+      ["pg", (): UpsertFn => (entries) =>
+        sql`
         INSERT INTO ${table} ${sql.insert(entries)}
         ON CONFLICT (store_id, id) DO UPDATE SET value=EXCLUDED.value, expires=EXCLUDED.expires
-      `.unprepared,
-    mysql: (): UpsertFn => (entries) =>
-      sql`
+      `.unprepared],
+      ["mysql", (): UpsertFn => (entries) =>
+        sql`
         INSERT INTO ${table} ${sql.insert(entries)}
         ON DUPLICATE KEY UPDATE value=VALUES(value), expires=VALUES(expires)
-      `.unprepared,
-    mssql: (): UpsertFn => (entries) =>
-      Effect.forEach(
-        entries,
-        (entry) =>
-          sql`
+      `.unprepared],
+      ["mssql", (): UpsertFn => (entries) =>
+        Effect.forEach(
+          entries,
+          (entry) =>
+            sql`
             MERGE ${table} AS target
             USING (SELECT ${entry.store_id} AS store_id, ${entry.id} AS id, ${entry.value} AS value, ${entry.expires} AS expires) AS source
             ON target.store_id = source.store_id AND target.id = source.id
@@ -742,15 +757,15 @@ export const layerBackingSql: Layer.Layer<
             WHEN NOT MATCHED THEN INSERT (store_id, id, value, expires)
             VALUES (source.store_id, source.id, source.value, source.expires);
           `,
-        { discard: true }
-      ),
-    // sqlite
-    orElse: (): UpsertFn => (entries) =>
+          { discard: true }
+        )]
+    ], // sqlite
+    (): UpsertFn => (entries) =>
       sql`
         INSERT INTO ${table} ${sql.insert(entries)}
         ON CONFLICT(store_id, id) DO UPDATE SET value=excluded.value, expires=excluded.expires
       `.unprepared
-  })
+  )
 
   return BackingPersistence.of({
     make: Effect.fnUntraced(function*(storeId) {

@@ -75,21 +75,25 @@ export const make = (options?: {
     const quoted = (table: string) => sql`${sql(table)}`.compile(true)[0]
 
     const tableExists = (table: string) =>
-      sql.onDialectOrElse({
+      sql.matchDialect([
         // Reading the catalog refreshes cached names after concurrent DDL.
-        pg: () => sql`SELECT 1 AS found FROM pg_class WHERE oid = to_regclass(${quoted(table)})`,
-        mysql: () =>
-          sql`SELECT 1 AS found FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ${table}`,
-        mssql: () => sql`SELECT 1 AS found WHERE OBJECT_ID(${table}, 'U') IS NOT NULL`,
-        orElse: () => sql`SELECT 1 AS found FROM sqlite_master WHERE type = 'table' AND name = ${table}`
-      }).pipe(Effect.map((rows) => rows.length > 0))
+        ["pg", () => sql`SELECT 1 AS found FROM pg_class WHERE oid = to_regclass(${quoted(table)})`],
+        [
+          "mysql",
+          () =>
+            sql`SELECT 1 AS found FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ${table}`
+        ],
+        ["mssql", () => sql`SELECT 1 AS found WHERE OBJECT_ID(${table}, 'U') IS NOT NULL`]
+      ], () => sql`SELECT 1 AS found FROM sqlite_master WHERE type = 'table' AND name = ${table}`).pipe(
+        Effect.map((rows) => rows.length > 0)
+      )
 
     const createSchema = Effect.gen(function*() {
       const eventIndex = sql(`${entryTable}_event_idx`)
       const timestampIndex = sql(`${entryTable}_timestamp_idx`)
 
-      yield* sql.onDialectOrElse({
-        pg: () =>
+      yield* sql.matchDialect([
+        ["pg", () =>
           sql`
             CREATE TABLE IF NOT EXISTS ${entryTableSql} (
               id BYTEA PRIMARY KEY,
@@ -97,8 +101,8 @@ export const make = (options?: {
               primary_key TEXT NOT NULL,
               payload BYTEA NOT NULL,
               timestamp BIGINT NOT NULL
-            )`,
-        mysql: () =>
+            )`],
+        ["mysql", () =>
           sql`
             CREATE TABLE IF NOT EXISTS ${entryTableSql} (
               id BINARY(16) PRIMARY KEY,
@@ -106,8 +110,8 @@ export const make = (options?: {
               primary_key TEXT NOT NULL,
               payload BLOB NOT NULL,
               timestamp BIGINT NOT NULL
-            )`,
-        mssql: () =>
+            )`],
+        ["mssql", () =>
           sql`
             CREATE TABLE IF NOT EXISTS ${entryTableSql} (
               id UNIQUEIDENTIFIER PRIMARY KEY,
@@ -115,150 +119,144 @@ export const make = (options?: {
               primary_key NVARCHAR(MAX) NOT NULL,
               payload VARBINARY(MAX) NOT NULL,
               timestamp BIGINT NOT NULL
-            )`,
-        orElse: () =>
-          sql`
+            )`]
+      ], () =>
+        sql`
             CREATE TABLE IF NOT EXISTS ${entryTableSql} (
               id BLOB PRIMARY KEY,
               event TEXT NOT NULL,
               primary_key TEXT NOT NULL,
               payload BLOB NOT NULL,
               timestamp INTEGER NOT NULL
-            )`
-      })
+            )`)
 
       // Insertion sequences let uploads include older entries imported later.
-      yield* sql.onDialectOrElse({
-        pg: () =>
+      yield* sql.matchDialect([
+        ["pg", () =>
           sql`
             CREATE TABLE IF NOT EXISTS ${sequenceTableSql} (
               sequence BIGSERIAL PRIMARY KEY,
               entry_id BYTEA NOT NULL UNIQUE
-            )`,
-        mysql: () =>
+            )`],
+        ["mysql", () =>
           sql`
             CREATE TABLE IF NOT EXISTS ${sequenceTableSql} (
               sequence BIGINT AUTO_INCREMENT PRIMARY KEY,
               entry_id BINARY(16) NOT NULL UNIQUE
-            )`,
-        mssql: () =>
+            )`],
+        ["mssql", () =>
           sql`
             CREATE TABLE ${sequenceTableSql} (
               sequence BIGINT IDENTITY(1,1) PRIMARY KEY,
               entry_id UNIQUEIDENTIFIER NOT NULL UNIQUE
-            )`,
-        orElse: () =>
-          sql`
+            )`]
+      ], () =>
+        sql`
             CREATE TABLE IF NOT EXISTS ${sequenceTableSql} (
               sequence INTEGER PRIMARY KEY,
               entry_id BLOB NOT NULL UNIQUE
-            )`
-      })
+            )`)
 
-      yield* sql.onDialectOrElse({
-        pg: () =>
+      yield* sql.matchDialect([
+        ["pg", () =>
           sql`
             CREATE TABLE IF NOT EXISTS ${checkpointsTableSql} (
               remote_id BYTEA PRIMARY KEY,
               sequence BIGINT NOT NULL
-            )`,
-        mysql: () =>
+            )`],
+        ["mysql", () =>
           sql`
             CREATE TABLE IF NOT EXISTS ${checkpointsTableSql} (
               remote_id BINARY(16) PRIMARY KEY,
               sequence BIGINT NOT NULL
-            )`,
-        mssql: () =>
+            )`],
+        ["mssql", () =>
           sql`
             CREATE TABLE ${checkpointsTableSql} (
               remote_id UNIQUEIDENTIFIER PRIMARY KEY,
               sequence BIGINT NOT NULL
-            )`,
-        orElse: () =>
-          sql`
+            )`]
+      ], () =>
+        sql`
             CREATE TABLE IF NOT EXISTS ${checkpointsTableSql} (
               remote_id BLOB PRIMARY KEY,
               sequence INTEGER NOT NULL
-            )`
-      })
+            )`)
 
-      yield* sql.onDialectOrElse({
-        pg: () =>
+      yield* sql.matchDialect([
+        ["pg", () =>
           sql`
             CREATE TABLE IF NOT EXISTS ${remoteCursorsTableSql} (
               remote_id BYTEA PRIMARY KEY,
               next_sequence INT NOT NULL
-            )`,
-        mysql: () =>
+            )`],
+        ["mysql", () =>
           sql`
             CREATE TABLE IF NOT EXISTS ${remoteCursorsTableSql} (
               remote_id BINARY(16) PRIMARY KEY,
               next_sequence INT NOT NULL
-            )`,
-        mssql: () =>
+            )`],
+        ["mssql", () =>
           sql`
             CREATE TABLE ${remoteCursorsTableSql} (
               remote_id UNIQUEIDENTIFIER PRIMARY KEY,
               next_sequence INT NOT NULL
-            )`,
-        orElse: () =>
-          sql`
+            )`]
+      ], () =>
+        sql`
             CREATE TABLE IF NOT EXISTS ${remoteCursorsTableSql} (
               remote_id BLOB PRIMARY KEY,
               next_sequence INT NOT NULL
-            )`
-      })
+            )`)
 
       // The remote each imported entry came from, so uploads skip it.
-      yield* sql.onDialectOrElse({
-        pg: () =>
+      yield* sql.matchDialect([
+        ["pg", () =>
           sql`
             CREATE TABLE IF NOT EXISTS ${sourcesTableSql} (
               entry_id BYTEA PRIMARY KEY,
               remote_id BYTEA NOT NULL
-            )`,
-        mysql: () =>
+            )`],
+        ["mysql", () =>
           sql`
             CREATE TABLE IF NOT EXISTS ${sourcesTableSql} (
               entry_id BINARY(16) PRIMARY KEY,
               remote_id BINARY(16) NOT NULL
-            )`,
-        mssql: () =>
+            )`],
+        ["mssql", () =>
           sql`
             CREATE TABLE ${sourcesTableSql} (
               entry_id UNIQUEIDENTIFIER PRIMARY KEY,
               remote_id UNIQUEIDENTIFIER NOT NULL
-            )`,
-        orElse: () =>
-          sql`
+            )`]
+      ], () =>
+        sql`
             CREATE TABLE IF NOT EXISTS ${sourcesTableSql} (
               entry_id BLOB PRIMARY KEY,
               remote_id BLOB NOT NULL
-            )`
-      })
+            )`)
 
-      yield* sql.onDialectOrElse({
+      yield* sql.matchDialect([
         // MySQL indexes TEXT columns by prefix only.
-        mysql: () =>
+        ["mysql", () =>
           Effect.andThen(
             sql`CREATE INDEX ${eventIndex} ON ${entryTableSql} (event(191), primary_key(191), timestamp)`,
             sql`CREATE INDEX ${timestampIndex} ON ${entryTableSql} (timestamp)`
-          ),
+          )],
         // B-tree entries are limited to about 2.7 KB, so index hashes of the
         // unbounded columns.
-        pg: () =>
+        ["pg", () =>
           Effect.andThen(
             sql`CREATE INDEX IF NOT EXISTS ${eventIndex} ON ${entryTableSql} (md5(event), md5(primary_key), timestamp)`,
             sql`CREATE INDEX IF NOT EXISTS ${timestampIndex} ON ${entryTableSql} (timestamp)`
-          ),
+          )],
         // NVARCHAR(MAX) columns cannot be index keys.
-        mssql: () => sql`CREATE INDEX ${timestampIndex} ON ${entryTableSql} (timestamp)`,
-        orElse: () =>
-          Effect.andThen(
-            sql`CREATE INDEX IF NOT EXISTS ${eventIndex} ON ${entryTableSql} (event, primary_key, timestamp)`,
-            sql`CREATE INDEX IF NOT EXISTS ${timestampIndex} ON ${entryTableSql} (timestamp)`
-          )
-      })
+        ["mssql", () => sql`CREATE INDEX ${timestampIndex} ON ${entryTableSql} (timestamp)`]
+      ], () =>
+        Effect.andThen(
+          sql`CREATE INDEX IF NOT EXISTS ${eventIndex} ON ${entryTableSql} (event, primary_key, timestamp)`,
+          sql`CREATE INDEX IF NOT EXISTS ${timestampIndex} ON ${entryTableSql} (timestamp)`
+        ))
 
       // Number existing entries in creation order. `WHERE true` keeps SQLite
       // from parsing ON CONFLICT as a join constraint.
@@ -296,10 +294,9 @@ export const make = (options?: {
     yield* Effect.gen(function*() {
       if (isComplete(yield* schemaState)) return
       yield* Effect.gen(function*() {
-        yield* sql.onDialectOrElse({
-          pg: () => sql`SELECT pg_advisory_xact_lock(hashtext(${quoted(entryTable)}))`,
-          orElse: () => Effect.void
-        })
+        yield* sql.matchDialect([
+          ["pg", () => sql`SELECT pg_advisory_xact_lock(hashtext(${quoted(entryTable)}))`]
+        ], () => Effect.void)
         const state = yield* schemaState
         if (!state.sources) yield* createSchema
         if (state.remotes) yield* importRemotes
@@ -329,10 +326,9 @@ export const make = (options?: {
       })
     // Serialize writers so checkpoints cannot skip out-of-order commits.
     // Lock before callbacks in both paths to avoid projection-row deadlocks.
-    const lockWriters = sql.onDialectOrElse({
-      pg: () => Effect.asVoid(sql`LOCK TABLE ${sequenceTableSql} IN SHARE ROW EXCLUSIVE MODE`),
-      orElse: () => Effect.void
-    })
+    const lockWriters = sql.matchDialect([
+      ["pg", () => Effect.asVoid(sql`LOCK TABLE ${sequenceTableSql} IN SHARE ROW EXCLUSIVE MODE`)]
+    ], () => Effect.void)
     const insertSequence = (entries: ReadonlyArray<EventJournal.Entry>) =>
       forEachChunk(entries, 1, (chunk) => {
         const rows = Arr.map(chunk, (entry) => ({ entry_id: entry.id }))
@@ -397,13 +393,12 @@ export const make = (options?: {
           return sql`SELECT * FROM ${entryTableSql} WHERE ${
             sql.and([
               // Match the hash index; exact predicates below rule out hash collisions.
-              ...sql.onDialectOrElse({
-                pg: () => [
+              ...sql.matchDialect([
+                ["pg", () => [
                   sql`md5(event) IN (${sql.csv(events.map((event) => sql`md5(${event})`))})`,
                   sql`md5(primary_key) IN (${sql.csv(primaryKeys.map((primaryKey) => sql`md5(${primaryKey})`))})`
-                ],
-                orElse: () => []
-              }),
+                ]]
+              ], () => []),
               sql.in("event", events),
               sql.in("primary_key", primaryKeys),
               // A coarse filter: the index compares ids exactly.
@@ -413,7 +408,7 @@ export const make = (options?: {
         }
         // Each group binds its event and key, twice on PostgreSQL, and one
         // parameter is left for the timestamp.
-        const groupsPerChunk = Math.floor((maxParameters - 1) / sql.onDialectOrElse({ pg: () => 4, orElse: () => 2 }))
+        const groupsPerChunk = Math.floor((maxParameters - 1) / sql.matchDialect([["pg", () => 4]], () => 2))
         const stored = yield* Effect.forEach(Arr.chunksOf(index.groups(), groupsPerChunk), conflicts).pipe(
           Effect.flatMap((rows) => decodeEntryRows(rows.flat())),
           Effect.map(toEntries)

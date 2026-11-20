@@ -88,31 +88,26 @@ describe("Statement", () => {
   const makeSql = (dialect: Statement.Dialect) =>
     Statement.make(Effect.die("connection not needed"), makeCompiler(dialect), [], undefined)
 
-  it("ignores custom properties hidden by a narrower case type", () => {
-    const cases = { spark: () => "warehouse", orElse: () => 0 }
-    const narrowed: { orElse: () => number } = cases
-    const result: number = makeSql("spark").onDialectOrElse(narrowed)
-    assert.strictEqual(result, 0)
-  })
-
-  it("selects a custom fallback using the constructor's dialect", () => {
+  it("matches built-in and custom dialects and passes unmatched dialects to the fallback", () => {
     const select = (sql: Statement.Constructor) =>
-      sql.onDialectOrElse({
-        pg: () => "postgres",
-        orElse: () => sql.dialect === "spark" ? "warehouse" : sql.dialect
-      })
+      sql.matchDialect([
+        ["pg", () => "postgres"],
+        ["spark", () => "warehouse"]
+      ], (dialect) => dialect)
     assert.strictEqual(select(makeSql("spark")), "warehouse")
     assert.strictEqual(select(makeSql("sqlite")), "sqlite")
     assert.strictEqual(select(makeSql("constructor")), "constructor")
     assert.strictEqual(select(makeSql("pg")), "postgres")
   })
 
-  it("calls the fallback with no arguments", () => {
-    function table(name = "users") {
-      assert.strictEqual(arguments.length, 0)
-      return name
-    }
-    assert.strictEqual(makeSql("sqlite").onDialectOrElse({ orElse: table }), "users")
+  it("runs only the first matching case, even when its result is undefined", () => {
+    const unexpected = () => assert.fail("Unselected callback ran")
+    const result = makeSql("pg").matchDialect([
+      ["sqlite", unexpected],
+      ["pg", () => undefined],
+      ["pg", unexpected]
+    ], unexpected)
+    assert.strictEqual(result, undefined)
   })
 
   it.effect("dispatches using the current compiler dialect on both client variants", () =>
@@ -137,46 +132,11 @@ describe("Statement", () => {
       const plain = sql.withoutTransforms()
       assert.strictEqual(plain.dialect, "spark")
       active = makeCompiler("mysql")
-      const cases = {
-        sqlite: () => "sqlite",
-        pg: () => "pg",
-        mysql: () => "mysql",
-        mssql: () => "mssql",
-        clickhouse: () => "clickhouse",
-        orElse: () => "fallback"
-      }
       for (const client of [sql, plain]) {
         assert.strictEqual(client.dialect, "mysql")
-        assert.strictEqual(client.onDialect(cases), "mysql")
-        assert.strictEqual(client.onDialectOrElse(cases), "mysql")
+        assert.strictEqual(client.matchDialect([["mysql", () => "mysql"]], () => "fallback"), "mysql")
       }
     }).pipe(Effect.provide(Reactivity.layer)))
-
-  it("calls built-in branches with their receiver and no arguments", () => {
-    class Cases {
-      readonly value = "postgres"
-      pg() {
-        assert.strictEqual(arguments.length, 0)
-        return this.value
-      }
-      orElse() {
-        return "fallback"
-      }
-    }
-    assert.strictEqual(makeSql("pg").onDialectOrElse(new Cases()), "postgres")
-  })
-
-  it("requires a built-in dialect for exhaustive dispatch", () => {
-    const builtInCases = {
-      sqlite: () => 1,
-      pg: () => 2,
-      mysql: () => 3,
-      mssql: () => 4,
-      clickhouse: () => 5
-    }
-    assert.strictEqual(makeSql("pg").onDialect(builtInCases), 2)
-    assert.throws(() => makeSql("spark").onDialect(builtInCases), /onDialectOrElse/)
-  })
 
   it("escapes updateValues aliases without transforming them", () => {
     const compiler = Statement.makeCompiler({

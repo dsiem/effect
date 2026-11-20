@@ -4,6 +4,10 @@
 "@effect/sql/Statement#custom":
   replacement: "effect/sql/Statement#custom"
   note: "Retained, but returns a Custom segment and uses paramA/paramB/paramC; wrap it with Statement.fragment when a Fragment is required."
+"@effect/sql/Statement#Dialect":
+  include: true
+  replacement: "effect/sql/Statement#Dialect"
+  note: "Includes third-party dialect strings. Add a default branch to switches that covered only the built-in dialects."
 "@effect/sql/Statement#defaultEscape":
   replacement: "effect/sql/Statement#defaultEscape"
   note: "Moved with the same signature."
@@ -43,4 +47,10 @@
 "@effect/sql/Statement#Constructor":
   include: true
   replacement: "effect/sql/Statement#Constructor"
-  note: "Moved to core Effect. sql.updateValues now escapes its alias as an identifier without applying name transforms; pass a bare alias such as \"data\" rather than pre-quoted SQL, and quote mixed-case PostgreSQL aliases where the query references them. sql.insert and sql.updateValues now require a non-empty array of rows; narrow array inputs with Array.isReadonlyArrayNonEmpty first."
+  note: >-
+    Moved to core Effect. Replace sql.onDialect and sql.onDialectOrElse with sql.matchDialect, passing a list of
+    [dialect, callback] pairs and a fallback that receives the unmatched dialect. Hand-written constructors must expose
+    their compiler's dialect. sql.updateValues now escapes its alias as an identifier without applying name transforms;
+    pass a bare alias such as "data" rather than pre-quoted SQL, and quote mixed-case PostgreSQL aliases where the query
+    references them. sql.insert and sql.updateValues now require a non-empty array of rows; narrow array inputs with
+    Array.isReadonlyArrayNonEmpty first.

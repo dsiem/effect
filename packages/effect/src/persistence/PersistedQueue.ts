@@ -1642,25 +1642,25 @@ export const makeStoreSql: (
     })
   )
 
-  const sqlNow = sql.onDialectOrElse({
-    // GETDATE() rounds to 1/300s and can land in the future, hiding freshly
-    // written visible_at values from the poll query
-    mssql: () => sql.literal("SYSDATETIME()"),
-    mysql: () => sql.literal("NOW()"),
-    pg: () => sql.literal("NOW()"),
-    // sqlite
-    orElse: () => sql.literal("CURRENT_TIMESTAMP")
-  })
+  const sqlNow = sql.matchDialect(
+    [
+      // GETDATE() rounds to 1/300s and can land in the future, hiding freshly
+      // written visible_at values from the poll query
+      ["mssql", () => sql.literal("SYSDATETIME()")],
+      ["mysql", () => sql.literal("NOW()")],
+      ["pg", () => sql.literal("NOW()")]
+    ], // sqlite
+    () => sql.literal("CURRENT_TIMESTAMP")
+  )
 
   // `seconds` is a whole number, possibly negative
   const secondsOffset = (seconds: number) => {
     const s = sql.literal(seconds.toString())
-    return sql.onDialectOrElse({
-      pg: () => sql`${sqlNow} + INTERVAL '${s} seconds'`,
-      mysql: () => sql`DATE_ADD(${sqlNow}, INTERVAL ${s} SECOND)`,
-      mssql: () => sql`DATEADD(SECOND, ${s}, ${sqlNow})`,
-      orElse: () => sql`datetime(${sqlNow}, '${s} seconds')`
-    })
+    return sql.matchDialect([
+      ["pg", () => sql`${sqlNow} + INTERVAL '${s} seconds'`],
+      ["mysql", () => sql`DATE_ADD(${sqlNow}, INTERVAL ${s} SECOND)`],
+      ["mssql", () => sql`DATEADD(SECOND, ${s}, ${sqlNow})`]
+    ], () => sql`datetime(${sqlNow}, '${s} seconds')`)
   }
   const secondsAgo = (seconds: number) => secondsOffset(-Math.max(Math.ceil(seconds), 0))
   // sqlite's CURRENT_TIMESTAMP drops the fraction of the current second, so
@@ -1673,40 +1673,40 @@ export const makeStoreSql: (
   // fraction, so it gets an extra second to cover it.
   const visibleAfter = (delay: Duration.Duration) => {
     const seconds = Math.max(Math.ceil(Duration.toSeconds(delay)), 0)
-    return sql.onDialectOrElse({
-      pg: () => sql`clock_timestamp() + INTERVAL '${sql.literal(seconds.toString())} seconds'`,
-      mysql: () => secondsOffset(seconds + 1),
-      mssql: () => secondsOffset(seconds),
-      orElse: () => sqliteOffset(seconds)
-    })
+    return sql.matchDialect([
+      ["pg", () => sql`clock_timestamp() + INTERVAL '${sql.literal(seconds.toString())} seconds'`],
+      ["mysql", () => secondsOffset(seconds + 1)],
+      ["mssql", () => secondsOffset(seconds)]
+    ], () => sqliteOffset(seconds))
   }
   const expiresAt = secondsAgo(Duration.toSeconds(lockExpiration))
 
-  const offer = sql.onDialectOrElse({
-    pg: () => (id: string, name: string, element: string, visibleAt: Fragment) =>
-      sql`
+  const offer = sql.matchDialect(
+    [
+      ["pg", () => (id: string, name: string, element: string, visibleAt: Fragment) =>
+        sql`
         INSERT INTO ${tableNameSql} (id, queue_name, element, state, attempts, visible_at, created_at, updated_at)
         VALUES (${id}, ${name}, ${element}, 'pending', 0, ${visibleAt}, ${sqlNow}, ${sqlNow})
         ON CONFLICT (id, queue_name) DO NOTHING
-      `,
-    mysql: () => (id: string, name: string, element: string, visibleAt: Fragment) =>
-      sql`
+      `],
+      ["mysql", () => (id: string, name: string, element: string, visibleAt: Fragment) =>
+        sql`
         INSERT IGNORE INTO ${tableNameSql} (id, queue_name, element, state, attempts, visible_at, created_at, updated_at)
         VALUES (${id}, ${name}, ${element}, 'pending', 0, ${visibleAt}, ${sqlNow}, ${sqlNow})
-      `,
-    // Avoids MERGE WITH (HOLDLOCK), whose range locks deadlock concurrent offers.
-    // - READCOMMITTEDLOCK makes the check wait for an uncommitted duplicate, even
-    //   under read committed snapshot.
-    // - A duplicate inserted after the check raises 2601/2627. XACT_ABORT is off
-    //   so that error doesn't doom the caller's transaction; it is restored
-    //   before rethrowing any other error.
-    // - The nested sp_executesql restores XACT_ABORT on exit, including on
-    //   cancellation.
-    mssql: () => {
-      // matches the SQL Server compiler's identifier escaping
-      const escape = (name: string) => `[${name.replace(/\]/g, "]]").replace(/\./g, "].[")}]`
-      const table = escape(tableName)
-      const offerSql = `
+      `],
+      // Avoids MERGE WITH (HOLDLOCK), whose range locks deadlock concurrent offers.
+      // - READCOMMITTEDLOCK makes the check wait for an uncommitted duplicate, even
+      //   under read committed snapshot.
+      // - A duplicate inserted after the check raises 2601/2627. XACT_ABORT is off
+      //   so that error doesn't doom the caller's transaction; it is restored
+      //   before rethrowing any other error.
+      // - The nested sp_executesql restores XACT_ABORT on exit, including on
+      //   cancellation.
+      ["mssql", () => {
+        // matches the SQL Server compiler's identifier escaping
+        const escape = (name: string) => `[${name.replace(/\]/g, "]]").replace(/\./g, "].[")}]`
+        const table = escape(tableName)
+        const offerSql = `
         SET XACT_ABORT OFF;
         BEGIN TRY
           IF NOT EXISTS (
@@ -1723,27 +1723,26 @@ export const makeStoreSql: (
             THROW;
           END
         END CATCH`
-      return (id: string, name: string, element: string, visibleAt: Fragment) =>
-        sql`
+        return (id: string, name: string, element: string, visibleAt: Fragment) =>
+          sql`
           DECLARE @visible_at DATETIME2 = ${visibleAt};
           DECLARE @xact_abort INT = @@OPTIONS & 16384;
           EXEC sp_executesql ${offerSql},
             N'@id NVARCHAR(MAX), @name NVARCHAR(MAX), @element NVARCHAR(MAX), @visible_at DATETIME2, @xact_abort INT',
             @id = ${id}, @name = ${name}, @element = ${element}, @visible_at = @visible_at, @xact_abort = @xact_abort;
         `
-    },
-    // sqlite
-    orElse: () => (id: string, name: string, element: string, visibleAt: Fragment) =>
+      }]
+    ], // sqlite
+    () => (id: string, name: string, element: string, visibleAt: Fragment) =>
       sql`
         INSERT OR IGNORE INTO ${tableNameSql} (id, queue_name, element, state, attempts, visible_at, created_at, updated_at)
         VALUES (${id}, ${name}, ${element}, 'pending', 0, ${visibleAt}, ${sqlNow}, ${sqlNow})
       `
-  })
+  )
 
-  const wrapString = sql.onDialectOrElse({
-    mssql: () => (s: string) => `N'${s}'`,
-    orElse: () => (s: string) => `'${s}'`
-  })
+  const wrapString = sql.matchDialect([
+    ["mssql", () => (s: string) => `N'${s}'`]
+  ], () => (s: string) => `'${s}'`)
   const stringLiteral = (s: string) => sql.literal(wrapString(s))
 
   // Elements this store has claimed and not yet settled. Each poll claims its
@@ -1876,9 +1875,10 @@ export const makeStoreSql: (
         Effect.interruptible
       )
 
-      const poll = sql.onDialectOrElse({
-        pg: () => (size: number, lockSql: Fragment) =>
-          sql<Element>`
+      const poll = sql.matchDialect(
+        [
+          ["pg", () => (size: number, lockSql: Fragment) =>
+            sql<Element>`
             WITH cte AS (
               UPDATE ${tableNameSql}
               SET acquired_at = ${sqlNow}, acquired_by = ${lockSql}, attempts = attempts + 1
@@ -1897,9 +1897,9 @@ export const makeStoreSql: (
             )
             SELECT sequence, id, element, attempts FROM cte
             ORDER BY visible_at ASC, sequence ASC
-          `,
-        mysql: () => (size: number, lockSql: Fragment) =>
-          sql<Element>`
+          `],
+          ["mysql", () => (size: number, lockSql: Fragment) =>
+            sql<Element>`
             SELECT sequence, id, element, attempts FROM ${tableNameSql} q
             WHERE queue_name = ${name}
             AND state = 'pending'
@@ -1910,26 +1910,26 @@ export const makeStoreSql: (
             LIMIT ${sql.literal(size.toString())}
             FOR UPDATE SKIP LOCKED
           `.pipe(
-            Effect.tap((rows) => {
-              if (rows.length === 0) return Effect.void
-              return sql`
+              Effect.tap((rows) => {
+                if (rows.length === 0) return Effect.void
+                return sql`
                 UPDATE ${tableNameSql}
                 SET acquired_at = ${sqlNow}, acquired_by = ${lockSql}, attempts = attempts + 1
                 WHERE sequence IN (${sql.literal(rows.map((r) => r.sequence).join(","))})
               `.unprepared
-            }),
-            Effect.map((rows) => {
-              for (const row of rows) {
-                row.attempts = Number(row.attempts) + 1
-              }
-              return rows
-            }),
-            sql.withTransaction
-          ),
-        // READPAST skips rows locked by another claim or a settlement instead
-        // of deadlocking with them
-        mssql: () => (size: number, lockSql: Fragment) =>
-          sql<Element>`
+              }),
+              Effect.map((rows) => {
+                for (const row of rows) {
+                  row.attempts = Number(row.attempts) + 1
+                }
+                return rows
+              }),
+              sql.withTransaction
+            )],
+          // READPAST skips rows locked by another claim or a settlement instead
+          // of deadlocking with them
+          ["mssql", () => (size: number, lockSql: Fragment) =>
+            sql<Element>`
             WITH cte AS (
               SELECT TOP ${sql.literal(size.toString())} sequence
               FROM ${tableNameSql} WITH (UPDLOCK, READPAST, ROWLOCK)
@@ -1945,9 +1945,9 @@ export const makeStoreSql: (
             OUTPUT inserted.sequence, inserted.id, inserted.element, inserted.attempts
             FROM ${tableNameSql} AS q
             INNER JOIN cte ON q.sequence = cte.sequence
-          `,
-        // sqlite
-        orElse: () => (size: number, lockSql: Fragment) =>
+          `]
+        ], // sqlite
+        () => (size: number, lockSql: Fragment) =>
           sql<Element>`
             UPDATE ${tableNameSql}
             SET acquired_at = ${sqlNow}, acquired_by = ${lockSql}, attempts = attempts + 1
@@ -1963,7 +1963,7 @@ export const makeStoreSql: (
             )
             RETURNING sequence, id, element, attempts
           `
-      })
+      )
 
       yield* Effect.gen(function*() {
         while (true) {
@@ -1998,9 +1998,10 @@ export const makeStoreSql: (
     idleTimeToLive: Duration.seconds(30)
   })
 
-  const cleanupBatch = sql.onDialectOrElse({
-    pg: () => (state: string, seconds: number) =>
-      sql<{ readonly count: number }>`
+  const cleanupBatch = sql.matchDialect(
+    [
+      ["pg", () => (state: string, seconds: number) =>
+        sql<{ readonly count: number }>`
         WITH deleted_entries AS (
           DELETE FROM ${tableNameSql}
           WHERE sequence IN (
@@ -2011,30 +2012,30 @@ export const makeStoreSql: (
           RETURNING 1
         )
         SELECT COUNT(*)::INT AS count FROM deleted_entries
-      `.pipe(Effect.map((rows) => rows[0].count)),
-    mysql: () =>
-      Effect.fnUntraced(
-        function*(state: string, seconds: number) {
-          const connection = yield* sql.reserve
-          const [statement, parameters] = sql`
+      `.pipe(Effect.map((rows) => rows[0].count))],
+      ["mysql", () =>
+        Effect.fnUntraced(
+          function*(state: string, seconds: number) {
+            const connection = yield* sql.reserve
+            const [statement, parameters] = sql`
             DELETE FROM ${tableNameSql}
             WHERE state = ${state} AND updated_at <= ${secondsAgo(seconds)}
             LIMIT ${sql.literal(String(sqlCleanupBatchSize))}
           `.compile()
-          yield* connection.execute(statement, parameters, undefined)
-          const rows = yield* connection.executeValues("SELECT ROW_COUNT()", [])
-          return Number(rows[0][0])
-        },
-        Effect.scoped
-      ),
-    mssql: () => (state: string, seconds: number) =>
-      sql<{ readonly sequence: number }>`
+            yield* connection.execute(statement, parameters, undefined)
+            const rows = yield* connection.executeValues("SELECT ROW_COUNT()", [])
+            return Number(rows[0][0])
+          },
+          Effect.scoped
+        )],
+      ["mssql", () => (state: string, seconds: number) =>
+        sql<{ readonly sequence: number }>`
         DELETE TOP (${sql.literal(String(sqlCleanupBatchSize))}) FROM ${tableNameSql}
         OUTPUT DELETED.sequence
         WHERE state = ${state} AND updated_at <= ${secondsAgo(seconds)}
-      `.pipe(Effect.map((rows) => rows.length)),
-    // sqlite
-    orElse: () => (state: string, seconds: number) =>
+      `.pipe(Effect.map((rows) => rows.length))]
+    ], // sqlite
+    () => (state: string, seconds: number) =>
       sql<{ readonly deleted: number }>`
         DELETE FROM ${tableNameSql}
         WHERE sequence IN (
@@ -2044,7 +2045,7 @@ export const makeStoreSql: (
         )
         RETURNING 1 AS deleted
       `.pipe(Effect.map((rows) => rows.length))
-  })
+  )
 
   const cleanupState = (state: string, timeToLive: Duration.Duration) =>
     cleanupBatch(state, Duration.toSeconds(timeToLive)).pipe(
@@ -2199,9 +2200,10 @@ const sqlMigrations = (tableName: string) =>
       const sql = (yield* SqlClient.SqlClient).withoutTransforms()
       const tableNameSql = sql(tableName)
 
-      yield* sql.onDialectOrElse({
-        mysql: () =>
-          sql`CREATE TABLE IF NOT EXISTS ${tableNameSql} (
+      yield* sql.matchDialect(
+        [
+          ["mysql", () =>
+            sql`CREATE TABLE IF NOT EXISTS ${tableNameSql} (
             sequence BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
             id VARCHAR(36) NOT NULL,
             queue_name VARCHAR(100) NOT NULL,
@@ -2213,9 +2215,9 @@ const sqlMigrations = (tableName: string) =>
             acquired_by VARCHAR(36) NULL,
             created_at DATETIME NOT NULL,
             updated_at DATETIME NOT NULL
-          )`,
-        pg: () =>
-          sql`CREATE TABLE IF NOT EXISTS ${tableNameSql} (
+          )`],
+          ["pg", () =>
+            sql`CREATE TABLE IF NOT EXISTS ${tableNameSql} (
             sequence SERIAL PRIMARY KEY,
             id VARCHAR(36) NOT NULL,
             queue_name VARCHAR(100) NOT NULL,
@@ -2227,9 +2229,9 @@ const sqlMigrations = (tableName: string) =>
             acquired_by UUID NULL,
             created_at TIMESTAMP NOT NULL,
             updated_at TIMESTAMP NOT NULL
-          )`,
-        mssql: () =>
-          sql`IF NOT EXISTS (SELECT * FROM sysobjects WHERE name=${tableName} AND xtype='U')
+          )`],
+          ["mssql", () =>
+            sql`IF NOT EXISTS (SELECT * FROM sysobjects WHERE name=${tableName} AND xtype='U')
           CREATE TABLE ${tableNameSql} (
             sequence INT IDENTITY(1,1) PRIMARY KEY,
             id NVARCHAR(36) NOT NULL,
@@ -2242,9 +2244,9 @@ const sqlMigrations = (tableName: string) =>
             acquired_by UNIQUEIDENTIFIER NULL,
             created_at DATETIME2 NOT NULL,
             updated_at DATETIME2 NOT NULL
-          )`,
-        // sqlite
-        orElse: () =>
+          )`]
+        ], // sqlite
+        () =>
           sql`CREATE TABLE IF NOT EXISTS ${tableNameSql} (
             sequence INTEGER PRIMARY KEY AUTOINCREMENT,
             id TEXT NOT NULL,
@@ -2258,92 +2260,97 @@ const sqlMigrations = (tableName: string) =>
             created_at DATETIME NOT NULL,
             updated_at DATETIME NOT NULL
           )`
-      })
+      )
 
-      yield* sql.onDialectOrElse({
-        mssql: () =>
+      yield* sql.matchDialect([
+        ["mssql", () =>
           sql`IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = N'idx_${tableName}_id')
-            CREATE UNIQUE INDEX ${sql(`idx_${tableName}_id`)} ON ${tableNameSql} (id, queue_name)`,
-        mysql: () =>
+            CREATE UNIQUE INDEX ${sql(`idx_${tableName}_id`)} ON ${tableNameSql} (id, queue_name)`],
+        ["mysql", () =>
           sql`CREATE UNIQUE INDEX ${sql(`idx_${tableName}_id`)} ON ${tableNameSql} (id, queue_name)`.pipe(
             Effect.ignore
-          ),
-        orElse: () =>
-          sql`CREATE UNIQUE INDEX IF NOT EXISTS ${sql(`idx_${tableName}_id`)} ON ${tableNameSql} (id, queue_name)`
-      })
+          )]
+      ], () => sql`CREATE UNIQUE INDEX IF NOT EXISTS ${sql(`idx_${tableName}_id`)} ON ${tableNameSql} (id, queue_name)`)
 
-      yield* sql.onDialectOrElse({
-        mssql: () =>
+      yield* sql.matchDialect([
+        ["mssql", () =>
           sql`IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = N'idx_${tableName}_take')
             CREATE INDEX ${
             sql(`idx_${tableName}_take`)
-          } ON ${tableNameSql} (queue_name, completed, attempts, acquired_at)`,
-        mysql: () =>
+          } ON ${tableNameSql} (queue_name, completed, attempts, acquired_at)`],
+        ["mysql", () =>
           sql`CREATE INDEX ${
             sql(`idx_${tableName}_take`)
           } ON ${tableNameSql} (queue_name, completed, attempts, acquired_at)`
-            .pipe(Effect.ignore),
-        orElse: () =>
-          sql`CREATE INDEX IF NOT EXISTS ${
-            sql(`idx_${tableName}_take`)
-          } ON ${tableNameSql} (queue_name, completed, attempts, acquired_at)`
-      })
+            .pipe(Effect.ignore)]
+      ], () =>
+        sql`CREATE INDEX IF NOT EXISTS ${
+          sql(`idx_${tableName}_take`)
+        } ON ${tableNameSql} (queue_name, completed, attempts, acquired_at)`)
 
-      yield* sql.onDialectOrElse({
-        mssql: () =>
+      yield* sql.matchDialect([
+        ["mssql", () =>
           sql`IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = N'idx_${tableName}_update')
-            CREATE INDEX ${sql(`idx_${tableName}_update`)} ON ${tableNameSql} (sequence, acquired_by)`,
-        mysql: () =>
+            CREATE INDEX ${sql(`idx_${tableName}_update`)} ON ${tableNameSql} (sequence, acquired_by)`],
+        ["mysql", () =>
           sql`CREATE INDEX ${sql(`idx_${tableName}_update`)} ON ${tableNameSql} (sequence, acquired_by)`.pipe(
             Effect.ignore
-          ),
-        orElse: () =>
-          sql`CREATE INDEX IF NOT EXISTS ${sql(`idx_${tableName}_update`)} ON ${tableNameSql} (sequence, acquired_by)`
-      })
+          )]
+      ], () =>
+        sql`CREATE INDEX IF NOT EXISTS ${sql(`idx_${tableName}_update`)} ON ${tableNameSql} (sequence, acquired_by)`)
     }),
     "0002_upgrade_schema": Effect.gen(function*() {
       const sql = (yield* SqlClient.SqlClient).withoutTransforms()
       const tableNameSql = sql(tableName)
       const takeIndex = sql(`idx_${tableName}_take`)
 
-      yield* sql.onDialectOrElse({
-        pg: Effect.fnUntraced(function*() {
-          yield* sql`DROP INDEX IF EXISTS ${takeIndex}`
-          yield* sql`ALTER TABLE ${tableNameSql}
+      yield* sql.matchDialect(
+        [
+          [
+            "pg",
+            Effect.fnUntraced(function*() {
+              yield* sql`DROP INDEX IF EXISTS ${takeIndex}`
+              yield* sql`ALTER TABLE ${tableNameSql}
               ADD COLUMN state VARCHAR(10),
               ADD COLUMN visible_at TIMESTAMP`
-          yield* sql`UPDATE ${tableNameSql}
+              yield* sql`UPDATE ${tableNameSql}
               SET state = CASE WHEN completed THEN 'completed' ELSE 'pending' END,
                   visible_at = updated_at`
-          yield* sql`ALTER TABLE ${tableNameSql}
+              yield* sql`ALTER TABLE ${tableNameSql}
               ALTER COLUMN sequence TYPE BIGINT,
               ALTER COLUMN id TYPE VARCHAR(255),
               ALTER COLUMN queue_name TYPE VARCHAR(255),
               ALTER COLUMN state SET NOT NULL,
               ALTER COLUMN visible_at SET NOT NULL,
               DROP COLUMN completed`
-        }),
-        mysql: Effect.fnUntraced(function*() {
-          yield* sql`DROP INDEX ${takeIndex} ON ${tableNameSql}`
-          yield* sql`ALTER TABLE ${tableNameSql}
+            })
+          ],
+          [
+            "mysql",
+            Effect.fnUntraced(function*() {
+              yield* sql`DROP INDEX ${takeIndex} ON ${tableNameSql}`
+              yield* sql`ALTER TABLE ${tableNameSql}
               MODIFY COLUMN id VARCHAR(255) NOT NULL,
               MODIFY COLUMN queue_name VARCHAR(255) NOT NULL,
               MODIFY COLUMN element MEDIUMTEXT NOT NULL,
               MODIFY COLUMN last_failure MEDIUMTEXT NULL,
               ADD COLUMN state VARCHAR(10) NULL,
               ADD COLUMN visible_at DATETIME NULL`
-          yield* sql`UPDATE ${tableNameSql}
+              yield* sql`UPDATE ${tableNameSql}
               SET state = CASE WHEN completed THEN 'completed' ELSE 'pending' END,
                   visible_at = updated_at`
-          yield* sql`ALTER TABLE ${tableNameSql}
+              yield* sql`ALTER TABLE ${tableNameSql}
               MODIFY COLUMN state VARCHAR(10) NOT NULL,
               MODIFY COLUMN visible_at DATETIME NOT NULL,
               DROP COLUMN completed`
-        }),
-        mssql: Effect.fnUntraced(function*() {
-          const upgradedTableName = `${tableName}_upgrade`
-          const upgradedTable = sql(upgradedTableName)
-          yield* sql`CREATE TABLE ${upgradedTable} (
+            })
+          ],
+          [
+            "mssql",
+            Effect.fnUntraced(function*() {
+              const upgradedTableName = `${tableName}_upgrade`
+              const upgradedTable = sql(upgradedTableName)
+              yield* sql`CREATE TABLE ${upgradedTable} (
               sequence BIGINT IDENTITY(1,1) PRIMARY KEY,
               id NVARCHAR(255) NOT NULL,
               queue_name NVARCHAR(255) NOT NULL,
@@ -2357,7 +2364,7 @@ const sqlMigrations = (tableName: string) =>
               created_at DATETIME2 NOT NULL,
               updated_at DATETIME2 NOT NULL
             )`
-          yield* sql`SET IDENTITY_INSERT ${upgradedTable} ON;
+              yield* sql`SET IDENTITY_INSERT ${upgradedTable} ON;
               INSERT INTO ${upgradedTable}
               (sequence, id, queue_name, element, state, attempts, last_failure, visible_at,
                 acquired_at, acquired_by, created_at, updated_at)
@@ -2366,14 +2373,16 @@ const sqlMigrations = (tableName: string) =>
                 attempts, last_failure, updated_at, acquired_at, acquired_by, created_at, updated_at
               FROM ${tableNameSql};
               SET IDENTITY_INSERT ${upgradedTable} OFF`
-          yield* sql`DROP TABLE ${tableNameSql}`
-          yield* sql`EXEC sp_rename ${upgradedTableName}, ${tableName}`
-          yield* sql`CREATE UNIQUE INDEX ${sql(`idx_${tableName}_id`)} ON ${tableNameSql} (id, queue_name)`
-          yield* sql`CREATE INDEX ${sql(`idx_${tableName}_update`)} ON ${tableNameSql} (sequence, acquired_by)`
-        }),
+              yield* sql`DROP TABLE ${tableNameSql}`
+              yield* sql`EXEC sp_rename ${upgradedTableName}, ${tableName}`
+              yield* sql`CREATE UNIQUE INDEX ${sql(`idx_${tableName}_id`)} ON ${tableNameSql} (id, queue_name)`
+              yield* sql`CREATE INDEX ${sql(`idx_${tableName}_update`)} ON ${tableNameSql} (sequence, acquired_by)`
+            })
+          ]
+        ],
         // sqlite rebuilds the table because altering or dropping constrained
         // columns is not portable across supported SQLite versions.
-        orElse: Effect.fnUntraced(function*() {
+        Effect.fnUntraced(function*() {
           const upgradedTableName = `${tableName}_upgrade`
           const upgradedTable = sql(upgradedTableName)
           yield* sql`DROP INDEX IF EXISTS ${takeIndex}`
@@ -2403,21 +2412,21 @@ const sqlMigrations = (tableName: string) =>
           yield* sql`CREATE UNIQUE INDEX ${sql(`idx_${tableName}_id`)} ON ${tableNameSql} (id, queue_name)`
           yield* sql`CREATE INDEX ${sql(`idx_${tableName}_update`)} ON ${tableNameSql} (sequence, acquired_by)`
         })
-      })
+      )
 
       // partial index where supported, so pollers never scan completed rows
-      yield* sql.onDialectOrElse({
-        mssql: () =>
+      yield* sql.matchDialect([
+        ["mssql", () =>
           sql`CREATE INDEX ${takeIndex} ON ${tableNameSql} (queue_name, visible_at)
-            WHERE state = 'pending'`,
-        mysql: () => sql`CREATE INDEX ${takeIndex} ON ${tableNameSql} (queue_name, state, visible_at)`,
-        pg: () =>
+            WHERE state = 'pending'`],
+        ["mysql", () =>
+          sql`CREATE INDEX ${takeIndex} ON ${tableNameSql} (queue_name, state, visible_at)`],
+        ["pg", () =>
           sql`CREATE INDEX ${takeIndex} ON ${tableNameSql} (queue_name, visible_at)
-            WHERE state = 'pending'`,
-        orElse: () =>
-          sql`CREATE INDEX ${takeIndex} ON ${tableNameSql} (queue_name, visible_at)
-            WHERE state = 'pending'`
-      })
+            WHERE state = 'pending'`]
+      ], () =>
+        sql`CREATE INDEX ${takeIndex} ON ${tableNameSql} (queue_name, visible_at)
+            WHERE state = 'pending'`)
     })
   })
 

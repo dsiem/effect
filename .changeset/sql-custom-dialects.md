@@ -2,9 +2,10 @@
 "effect": minor
 ---
 
-SQL adapters can declare their own `Statement.Dialect`, and callers can read `sql.dialect` to select dialect-specific queries.
+SQL adapters can declare their own `Statement.Dialect`, and callers can select built-in or custom dialects with `sql.matchDialect`.
 
 ### Breaking changes
 
-- Add a fallback to exhaustive switches on `Statement.Dialect`. Use `onDialectOrElse` when a client may use a third-party dialect.
+- Replace `sql.onDialect` and `sql.onDialectOrElse` with `sql.matchDialect`. Pass a list of `[dialect, callback]` pairs and a fallback that receives the unmatched dialect. Wrap existing callbacks that expect the case object as `this` or a fallback invocation with zero arguments.
+- Add a fallback to exhaustive switches on `Statement.Dialect`.
 - Hand-written implementations of `Statement.Constructor` must expose their compiler's `dialect`.

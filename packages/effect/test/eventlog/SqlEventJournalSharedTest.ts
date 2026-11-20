@@ -11,19 +11,18 @@ let nextNamespace = 0
 // advisory, user-level or application locks.
 const lockWaits = Effect.gen(function*() {
   const sql = yield* SqlClient.SqlClient
-  const [row] = yield* sql.onDialectOrElse({
-    pg: () =>
+  const [row] = yield* sql.matchDialect([
+    ["pg", () =>
       sql<{ n: number }>`
         SELECT COUNT(*)::int AS n FROM pg_stat_activity
-        WHERE wait_event_type = 'Lock' AND datname = current_database()`,
-    mysql: () =>
+        WHERE wait_event_type = 'Lock' AND datname = current_database()`],
+    ["mysql", () =>
       sql<{ n: number }>`
         SELECT
           (SELECT COUNT(*) FROM performance_schema.data_lock_waits) +
-          (SELECT COUNT(*) FROM performance_schema.metadata_locks WHERE LOCK_STATUS = 'PENDING') AS n`,
-    mssql: () => sql<{ n: number }>`SELECT COUNT(*) AS n FROM sys.dm_exec_requests WHERE blocking_session_id <> 0`,
-    orElse: () => Effect.die("competing journal writers need a server dialect")
-  })
+          (SELECT COUNT(*) FROM performance_schema.metadata_locks WHERE LOCK_STATUS = 'PENDING') AS n`],
+    ["mssql", () => sql<{ n: number }>`SELECT COUNT(*) AS n FROM sys.dm_exec_requests WHERE blocking_session_id <> 0`]
+  ], () => Effect.die("competing journal writers need a server dialect"))
   return Number(row.n)
 })
 

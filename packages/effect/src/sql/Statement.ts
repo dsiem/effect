@@ -100,11 +100,7 @@ export const fragment = (
  * @category models
  * @since 4.0.0
  */
-export type Dialect = BuiltinDialect | (string & {})
-
-const builtinDialects = { sqlite: true, pg: true, mysql: true, mssql: true, clickhouse: true }
-type BuiltinDialect = keyof typeof builtinDialects
-const isBuiltinDialect = (dialect: Dialect): dialect is BuiltinDialect => Object.hasOwn(builtinDialects, dialect)
+export type Dialect = "sqlite" | "pg" | "mysql" | "mssql" | "clickhouse" | (string & {})
 
 /**
  * Executable SQL statement that is also a `Fragment` and `Effect`, with helpers
@@ -622,31 +618,14 @@ export interface Constructor {
   readonly dialect: Dialect
 
   /**
-   * Runs the branch for one of Effect's built-in SQL dialects. Throws for
-   * custom dialects. Use `onDialectOrElse` to select a custom branch.
+   * Runs the first callback whose dialect matches the compiler's current dialect.
+   * If no case matches, calls `orElse` with that dialect. Cases can name built-in
+   * or third-party dialects.
    */
-  readonly onDialect: <A, B, C, D, E>(options: {
-    readonly sqlite: () => A
-    readonly pg: () => B
-    readonly mysql: () => C
-    readonly mssql: () => D
-    readonly clickhouse: () => E
-  }) => A | B | C | D | E
-
-  /**
-   * Runs the matching built-in dialect branch, or calls `orElse` with no
-   * arguments. Read `sql.dialect` inside `orElse` to handle third-party dialects.
-   * Keep supplied built-in branches in the case object's type so their
-   * return types are included in the result.
-   */
-  readonly onDialectOrElse: <A, B = never, C = never, D = never, E = never, F = never>(options: {
-    readonly orElse: () => A
-    readonly sqlite?: () => B
-    readonly pg?: () => C
-    readonly mysql?: () => D
-    readonly mssql?: () => E
-    readonly clickhouse?: () => F
-  }) => A | B | C | D | E | F
+  readonly matchDialect: <A, Results extends ReadonlyArray<unknown>>(
+    cases: { readonly [I in keyof Results]: readonly [dialect: Dialect, select: () => A | Results[I]] },
+    orElse: (dialect: Dialect) => A
+  ) => A | Results[number]
 }
 
 /**
@@ -664,17 +643,14 @@ export const make = (
   transformRows: (<A extends object>(row: ReadonlyArray<A>) => ReadonlyArray<A>) | undefined,
   borrower?: Borrower | undefined
 ): Constructor => {
-  const onDialect: Constructor["onDialect"] = (options) => {
+  const matchDialect: Constructor["matchDialect"] = (cases, orElse) => {
     const { dialect } = compiler
-    if (!isBuiltinDialect(dialect)) {
-      throw new Error(`No SQL branch for dialect "${dialect}". Use onDialectOrElse to provide a fallback.`)
+    for (const [name, select] of cases) {
+      if (name === dialect) {
+        return select()
+      }
     }
-    return options[dialect]()
-  }
-  const onDialectOrElse: Constructor["onDialectOrElse"] = (options) => {
-    const { dialect } = compiler
-    const branch = isBuiltinDialect(dialect) ? options[dialect] : undefined
-    return branch !== undefined ? Reflect.apply(branch, options, []) : options.orElse()
+    return orElse(dialect)
   }
   function sql(strings: unknown, ...args: Array<any>): any {
     if (typeof strings === "string") {
@@ -734,8 +710,7 @@ export const make = (
       or,
       csv,
       join,
-      onDialect,
-      onDialectOrElse
+      matchDialect
     }
   )
 

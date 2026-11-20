@@ -616,34 +616,35 @@ export const layerSql = (
       const tableName = options.table ?? "effect_key_value_store"
       const table = sql(tableName)
 
-      yield* sql.onDialectOrElse({
-        mysql: () =>
-          sql`
+      yield* sql.matchDialect(
+        [
+          ["mysql", () =>
+            sql`
           CREATE TABLE IF NOT EXISTS ${table} (
             id VARCHAR(191) PRIMARY KEY,
             value BLOB NOT NULL,
             value_type SMALLINT NOT NULL
           )
-        `,
-        pg: () =>
-          sql`
+        `],
+          ["pg", () =>
+            sql`
           CREATE TABLE IF NOT EXISTS ${table} (
             id TEXT PRIMARY KEY,
             value BYTEA NOT NULL,
             value_type SMALLINT NOT NULL
           )
-        `,
-        mssql: () =>
-          sql`
+        `],
+          ["mssql", () =>
+            sql`
           IF NOT EXISTS (SELECT * FROM sysobjects WHERE name=${tableName} AND xtype='U')
           CREATE TABLE ${table} (
             id NVARCHAR(450) PRIMARY KEY,
             value VARBINARY(MAX) NOT NULL,
             value_type SMALLINT NOT NULL
           )
-        `,
-        // sqlite
-        orElse: () =>
+        `]
+        ], // sqlite
+        () =>
           sql`
           CREATE TABLE IF NOT EXISTS ${table} (
             id TEXT PRIMARY KEY,
@@ -651,7 +652,7 @@ export const layerSql = (
             value_type INTEGER NOT NULL
           )
         `
-      }).pipe(Effect.orDie)
+      ).pipe(Effect.orDie)
 
       type UpsertFn = (entry: {
         id: string
@@ -659,50 +660,52 @@ export const layerSql = (
         value_type: number
       }) => Effect.Effect<unknown, SqlError>
 
-      const upsert = sql.onDialectOrElse({
-        pg: (): UpsertFn => (entry) =>
-          sql`
+      const upsert = sql.matchDialect(
+        [
+          ["pg", (): UpsertFn => (entry) =>
+            sql`
           INSERT INTO ${table} (id, value, value_type) VALUES (${entry.id}, ${entry.value}, ${entry.value_type})
           ON CONFLICT (id) DO UPDATE SET value=EXCLUDED.value, value_type=EXCLUDED.value_type
-        `.unprepared,
-        mysql: (): UpsertFn => (entry) =>
-          sql`
+        `.unprepared],
+          ["mysql", (): UpsertFn => (entry) =>
+            sql`
           INSERT INTO ${table} (id, value, value_type) VALUES (${entry.id}, ${entry.value}, ${entry.value_type})
           ON DUPLICATE KEY UPDATE value=VALUES(value), value_type=VALUES(value_type)
-        `,
-        mssql: (): UpsertFn => (entry) =>
-          sql`
+        `],
+          ["mssql", (): UpsertFn => (entry) =>
+            sql`
           MERGE ${table} AS target
           USING (SELECT ${entry.id} AS id, ${entry.value} AS value, ${entry.value_type} AS value_type) AS source
           ON target.id = source.id
           WHEN MATCHED THEN UPDATE SET value = source.value, value_type = source.value_type
           WHEN NOT MATCHED THEN INSERT (id, value, value_type)
           VALUES (source.id, source.value, source.value_type);
-        `,
-        // sqlite
-        orElse: (): UpsertFn => (entry) =>
+        `]
+        ], // sqlite
+        (): UpsertFn => (entry) =>
           sql`
           INSERT INTO ${table} (id, value, value_type) VALUES (${entry.id}, ${entry.value}, ${entry.value_type})
           ON CONFLICT(id) DO UPDATE SET value=excluded.value, value_type=excluded.value_type
         `.unprepared
-      })
+      )
 
       // The first LIKE uses the primary key index. On mysql and mssql it follows
       // the column collation, which is usually case / accent-insensitive, so a
       // second binary LIKE keeps only exact prefix matches.
-      const deleteByPrefix = sql.onDialectOrElse({
-        // sqlite LIKE is case-insensitive, so compare the leading characters
-        orElse: () => (prefix: string) => sql`DELETE FROM ${table} WHERE substr(id, 1, length(${prefix})) = ${prefix}`,
-        pg: () => (prefix: string) => sql`DELETE FROM ${table} WHERE id LIKE ${escapeLike(prefix)} ESCAPE '!'`,
-        mysql: () => (prefix: string) => {
-          const pattern = escapeLike(prefix)
-          return sql`DELETE FROM ${table} WHERE id LIKE ${pattern} ESCAPE '!' AND CONVERT(id USING utf8mb4) COLLATE utf8mb4_bin LIKE ${pattern} ESCAPE '!'`
-        },
-        mssql: () => (prefix: string) => {
-          const pattern = escapeLike(prefix)
-          return sql`DELETE FROM ${table} WHERE id LIKE ${pattern} ESCAPE '!' AND id COLLATE Latin1_General_100_BIN2 LIKE ${pattern} ESCAPE '!'`
-        }
-      })
+      const deleteByPrefix = sql.matchDialect(
+        [
+          ["pg", () => (prefix: string) => sql`DELETE FROM ${table} WHERE id LIKE ${escapeLike(prefix)} ESCAPE '!'`],
+          ["mysql", () => (prefix: string) => {
+            const pattern = escapeLike(prefix)
+            return sql`DELETE FROM ${table} WHERE id LIKE ${pattern} ESCAPE '!' AND CONVERT(id USING utf8mb4) COLLATE utf8mb4_bin LIKE ${pattern} ESCAPE '!'`
+          }],
+          ["mssql", () => (prefix: string) => {
+            const pattern = escapeLike(prefix)
+            return sql`DELETE FROM ${table} WHERE id LIKE ${pattern} ESCAPE '!' AND id COLLATE Latin1_General_100_BIN2 LIKE ${pattern} ESCAPE '!'`
+          }]
+        ], // sqlite LIKE is case-insensitive, so compare the leading characters
+        () => (prefix: string) => sql`DELETE FROM ${table} WHERE substr(id, 1, length(${prefix})) = ${prefix}`
+      )
 
       const encoder = new TextEncoder()
       const decoder = new TextDecoder()

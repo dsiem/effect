@@ -72,35 +72,34 @@ export const makeStorage = Effect.fnUntraced(function*(options?: StorageOptions)
   const storesTableSql = sql(storesTable)
   const sessionAuthBindingsTableSql = sql(sessionAuthBindingsTable)
 
-  yield* sql.onDialectOrElse({
-    pg: () =>
+  yield* sql.matchDialect([
+    ["pg", () =>
       sql`
           CREATE TABLE IF NOT EXISTS ${remoteIdTableSql} (
             singleton INT PRIMARY KEY,
             remote_id BYTEA NOT NULL
-          )`,
-    mysql: () =>
+          )`],
+    ["mysql", () =>
       sql`
           CREATE TABLE IF NOT EXISTS ${remoteIdTableSql} (
             singleton INT PRIMARY KEY,
             remote_id BINARY(16) NOT NULL
-          )`,
-    mssql: () =>
+          )`],
+    ["mssql", () =>
       sql`
           CREATE TABLE IF NOT EXISTS ${remoteIdTableSql} (
             singleton INT PRIMARY KEY,
             remote_id VARBINARY(16) NOT NULL
-          )`,
-    orElse: () =>
-      sql`
+          )`]
+  ], () =>
+    sql`
           CREATE TABLE IF NOT EXISTS ${remoteIdTableSql} (
             singleton INTEGER PRIMARY KEY,
             remote_id BLOB NOT NULL
-          )`
-  })
+          )`)
 
-  yield* sql.onDialectOrElse({
-    pg: () =>
+  yield* sql.matchDialect([
+    ["pg", () =>
       sql`
           CREATE TABLE IF NOT EXISTS ${entriesTableSql} (
             store_id TEXT NOT NULL,
@@ -111,8 +110,8 @@ export const makeStorage = Effect.fnUntraced(function*(options?: StorageOptions)
             payload BYTEA NOT NULL,
             PRIMARY KEY (store_id, sequence),
             UNIQUE (store_id, entry_id)
-          )`,
-    mysql: () =>
+          )`],
+    ["mysql", () =>
       sql`
           CREATE TABLE IF NOT EXISTS ${entriesTableSql} (
             store_id VARCHAR(191) NOT NULL,
@@ -123,8 +122,8 @@ export const makeStorage = Effect.fnUntraced(function*(options?: StorageOptions)
             payload BLOB NOT NULL,
             PRIMARY KEY (store_id, sequence),
             UNIQUE (store_id, entry_id)
-          )`,
-    mssql: () =>
+          )`],
+    ["mssql", () =>
       sql`
           CREATE TABLE IF NOT EXISTS ${entriesTableSql} (
             store_id NVARCHAR(191) NOT NULL,
@@ -135,9 +134,9 @@ export const makeStorage = Effect.fnUntraced(function*(options?: StorageOptions)
             payload VARBINARY(MAX) NOT NULL,
             PRIMARY KEY (store_id, sequence),
             UNIQUE (store_id, entry_id)
-          )`,
-    orElse: () =>
-      sql`
+          )`]
+  ], () =>
+    sql`
           CREATE TABLE IF NOT EXISTS ${entriesTableSql} (
             store_id TEXT NOT NULL,
             sequence INTEGER NOT NULL,
@@ -147,20 +146,19 @@ export const makeStorage = Effect.fnUntraced(function*(options?: StorageOptions)
             payload BLOB NOT NULL,
             PRIMARY KEY (store_id, sequence),
             UNIQUE (store_id, entry_id)
-          )`
-  })
+          )`)
 
   // Serves the batch lookup in `entriesAfter`. Postgres indexes hashes to stay
   // under its B-tree row limit, MySQL indexes prefixes, and MSSQL has no
   // bounded index yet.
   const eventKeyIndex = `${entriesTable}_event_key_idx`
-  yield* sql.onDialectOrElse({
-    pg: () =>
+  yield* sql.matchDialect([
+    ["pg", () =>
       sql`
           CREATE INDEX IF NOT EXISTS ${sql(eventKeyIndex)}
           ON ${entriesTableSql} (store_id, hashtextextended(event, 0), hashtextextended(primary_key, 0), entry_id)
-        `,
-    mysql: () => {
+        `],
+    ["mysql", () => {
       const indexExists = sql<{ readonly count: number }>`
           SELECT COUNT(*) AS count FROM information_schema.statistics
           WHERE table_schema = DATABASE()
@@ -175,68 +173,65 @@ export const makeStorage = Effect.fnUntraced(function*(options?: StorageOptions)
         `.pipe(
         Effect.catch((error) => Effect.flatMap(indexExists, (exists) => exists ? Effect.void : Effect.fail(error)))
       )
-    },
-    mssql: () => Effect.void,
-    orElse: () =>
-      sql`
+    }],
+    ["mssql", () => Effect.void]
+  ], () =>
+    sql`
           CREATE INDEX IF NOT EXISTS ${sql(eventKeyIndex)}
           ON ${entriesTableSql} (store_id, event, primary_key, entry_id)
-        `
-  })
+        `)
 
-  yield* sql.onDialectOrElse({
-    pg: () =>
+  yield* sql.matchDialect([
+    ["pg", () =>
       sql`
           CREATE TABLE IF NOT EXISTS ${storesTableSql} (
             store_id TEXT PRIMARY KEY,
             next_sequence BIGINT NOT NULL
-          )`,
-    mysql: () =>
+          )`],
+    ["mysql", () =>
       sql`
           CREATE TABLE IF NOT EXISTS ${storesTableSql} (
             store_id VARCHAR(191) PRIMARY KEY,
             next_sequence BIGINT NOT NULL
-          )`,
-    mssql: () =>
+          )`],
+    ["mssql", () =>
       sql`
           CREATE TABLE IF NOT EXISTS ${storesTableSql} (
             store_id NVARCHAR(191) PRIMARY KEY,
             next_sequence BIGINT NOT NULL
-          )`,
-    orElse: () =>
-      sql`
+          )`]
+  ], () =>
+    sql`
           CREATE TABLE IF NOT EXISTS ${storesTableSql} (
             store_id TEXT PRIMARY KEY,
             next_sequence INTEGER NOT NULL
-          )`
-  })
+          )`)
 
-  yield* sql.onDialectOrElse({
-    pg: () =>
+  yield* sql.matchDialect([
+    ["pg", () =>
       sql`
           CREATE TABLE IF NOT EXISTS ${sessionAuthBindingsTableSql} (
             public_key TEXT PRIMARY KEY,
             signing_public_key BYTEA NOT NULL
-          )`,
-    mysql: () =>
+          )`],
+    ["mysql", () =>
       sql`
           CREATE TABLE IF NOT EXISTS ${sessionAuthBindingsTableSql} (
             public_key VARCHAR(191) PRIMARY KEY,
             signing_public_key BINARY(32) NOT NULL
-          )`,
-    mssql: () =>
+          )`],
+    ["mssql", () =>
       sql`
           CREATE TABLE IF NOT EXISTS ${sessionAuthBindingsTableSql} (
             public_key NVARCHAR(191) PRIMARY KEY,
             signing_public_key VARBINARY(32) NOT NULL
-          )`,
-    orElse: () =>
-      sql`
+          )`]
+  ], () =>
+    sql`
           CREATE TABLE IF NOT EXISTS ${sessionAuthBindingsTableSql} (
             public_key TEXT PRIMARY KEY,
             signing_public_key BLOB NOT NULL
-          )`
-  })
+          )`)
 
   const selectRemoteId = sql<{ remote_id: Uint8Array }>`
       SELECT remote_id
@@ -295,20 +290,20 @@ export const makeStorage = Effect.fnUntraced(function*(options?: StorageOptions)
     )
 
   const ensureStore = (storeId: string) =>
-    sql.onDialectOrElse({
-      pg: () =>
+    sql.matchDialect([
+      ["pg", () =>
         sql`
             INSERT INTO ${storesTableSql} (store_id, next_sequence)
             VALUES (${storeId}, 1)
             ON CONFLICT (store_id) DO NOTHING
-          `,
-      mysql: () =>
+          `],
+      ["mysql", () =>
         sql`
             INSERT INTO ${storesTableSql} (store_id, next_sequence)
             VALUES (${storeId}, 1)
             ON DUPLICATE KEY UPDATE store_id = store_id
-          `,
-      mssql: () =>
+          `],
+      ["mssql", () =>
         sql`
             MERGE ${storesTableSql} WITH (HOLDLOCK) AS target
             USING (SELECT ${storeId} AS store_id, 1 AS next_sequence) AS source
@@ -316,47 +311,45 @@ export const makeStorage = Effect.fnUntraced(function*(options?: StorageOptions)
             WHEN NOT MATCHED THEN
               INSERT (store_id, next_sequence)
               VALUES (source.store_id, source.next_sequence);
-          `,
-      orElse: () =>
-        sql`
+          `]
+    ], () =>
+      sql`
             INSERT INTO ${storesTableSql} (store_id, next_sequence)
             VALUES (${storeId}, 1)
             ON CONFLICT DO NOTHING
-          `
-    })
+          `)
 
   const lockStore = (storeId: string) =>
-    sql.onDialectOrElse({
-      pg: () =>
+    sql.matchDialect([
+      ["pg", () =>
         sql`
             SELECT next_sequence
             FROM ${storesTableSql}
             WHERE store_id = ${storeId}
             FOR UPDATE
-          `,
-      mysql: () =>
+          `],
+      ["mysql", () =>
         sql`
             SELECT next_sequence
             FROM ${storesTableSql}
             WHERE store_id = ${storeId}
             FOR UPDATE
-          `,
-      mssql: () =>
+          `],
+      ["mssql", () =>
         sql`
             SELECT next_sequence
             FROM ${storesTableSql} WITH (UPDLOCK, HOLDLOCK)
             WHERE store_id = ${storeId}
-          `,
-      orElse: () =>
-        sql`
+          `]
+    ], () =>
+      sql`
             UPDATE ${storesTableSql}
             SET next_sequence = next_sequence
             WHERE store_id = ${storeId}
             RETURNING next_sequence
-          `
-    }).pipe(
-      Effect.flatMap(decodeStoreSequence)
-    )
+          `).pipe(
+        Effect.flatMap(decodeStoreSequence)
+      )
 
   const setNextSequence = (storeId: string, nextSequence: number) =>
     sql`
@@ -377,18 +370,20 @@ export const makeStorage = Effect.fnUntraced(function*(options?: StorageOptions)
 
   // Postgres matches on the indexed hashes, then on the values to rule out
   // collisions.
-  const matchesKey = sql.onDialectOrElse({
-    pg: () => (event: string, primaryKeys: ReadonlyArray<string>) =>
-      sql`
+  const matchesKey = sql.matchDialect(
+    [
+      ["pg", () => (event: string, primaryKeys: ReadonlyArray<string>) =>
+        sql`
           hashtextextended(event, 0) = hashtextextended(${event}, 0) AND event = ${event}
           AND hashtextextended(primary_key, 0) IN (${
-        sql.csv(primaryKeys.map((primaryKey) => sql`hashtextextended(${primaryKey}, 0)`))
-      })
+          sql.csv(primaryKeys.map((primaryKey) => sql`hashtextextended(${primaryKey}, 0)`))
+        })
           AND ${sql.in("primary_key", primaryKeys)}
-        `,
-    orElse: () => (event: string, primaryKeys: ReadonlyArray<string>) =>
+        `]
+    ],
+    () => (event: string, primaryKeys: ReadonlyArray<string>) =>
       sql`event = ${event} AND ${sql.in("primary_key", primaryKeys)}`
-  })
+  )
 
   // One SELECT per index lookup, joined with UNION ALL: MySQL scans the whole
   // store for the equivalent OR.

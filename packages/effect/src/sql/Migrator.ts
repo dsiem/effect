@@ -135,45 +135,44 @@ export const make = <RD = never>({
   Effect.gen(function*() {
     const sql = yield* Client.SqlClient
 
-    const createMigrationsTable = transformWrites(sql.onDialectOrElse({
-      mssql: () =>
+    const createMigrationsTable = transformWrites(sql.matchDialect([
+      ["mssql", () =>
         sql`IF OBJECT_ID(N'${sql.literal(table)}', N'U') IS NULL
   CREATE TABLE ${sql(table)} (
     migration_id INT NOT NULL PRIMARY KEY,
     name VARCHAR(255) NOT NULL,
     created_at DATETIME NOT NULL DEFAULT GETDATE()
-  )`,
-      mysql: () =>
+  )`],
+      ["mysql", () =>
         sql`CREATE TABLE IF NOT EXISTS ${sql(table)} (
   migration_id INTEGER UNSIGNED NOT NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   name VARCHAR(255) NOT NULL,
   PRIMARY KEY (migration_id)
-)`,
-      clickhouse: () =>
+)`],
+      ["clickhouse", () =>
         // sqlite's `PRIMARY KEY NOT NULL` is a syntax error here
         sql`CREATE TABLE IF NOT EXISTS ${sql(table)} (
   migration_id Int32,
   created_at DateTime DEFAULT now(),
   name String
 ) ENGINE = MergeTree
-ORDER BY migration_id`,
-      pg: () =>
+ORDER BY migration_id`],
+      ["pg", () =>
         sql`CREATE TABLE ${sql(table)} (
   migration_id integer primary key,
   created_at timestamp with time zone not null default now(),
   name text not null
-)`,
-      orElse: () =>
-        sql`CREATE TABLE IF NOT EXISTS ${sql(table)} (
+)`]
+    ], () =>
+      sql`CREATE TABLE IF NOT EXISTS ${sql(table)} (
   migration_id integer PRIMARY KEY NOT NULL,
   created_at datetime NOT NULL DEFAULT current_timestamp,
   name VARCHAR(255) NOT NULL
-)`
-    }))
+)`))
 
-    const ensureMigrationsTable = sql.onDialectOrElse({
-      pg: () =>
+    const ensureMigrationsTable = sql.matchDialect([
+      ["pg", () =>
         Effect.flatMap(
           migrationsTableExists(sql, table),
           (exists) =>
@@ -185,9 +184,8 @@ ORDER BY migration_id`,
                 )
               )
             )
-        ),
-      orElse: () => createMigrationsTable
-    })
+        )]
+    ], () => createMigrationsTable)
 
     const insertMigrations = (
       rows: Arr.NonEmptyReadonlyArray<[id: number, name: string]>
@@ -260,16 +258,14 @@ ORDER BY migration_id`,
     // === run
 
     // BEGIN is still experimental on clickhouse
-    const transactional = sql.onDialectOrElse({
-      clickhouse: () => false,
-      orElse: () => true
-    })
+    const transactional = sql.matchDialect([
+      ["clickhouse", () => false]
+    ], () => true)
 
     const run = Effect.gen(function*() {
-      yield* sql.onDialectOrElse({
-        pg: () => sql`LOCK TABLE ${sql(table)} IN ACCESS EXCLUSIVE MODE`,
-        orElse: () => Effect.void
-      })
+      yield* sql.matchDialect([
+        ["pg", () => sql`LOCK TABLE ${sql(table)} IN ACCESS EXCLUSIVE MODE`]
+      ], () => Effect.void)
 
       const [latestMigrationId, current] = yield* Effect.all([
         Effect.map(

@@ -92,15 +92,14 @@ export const makeRepository = <
       Request: Model.insert,
       Result: Model,
       execute: (request) =>
-        sql.onDialectOrElse({
-          mysql: () =>
+        sql.matchDialect([
+          ["mysql", () =>
             sql`insert into ${sql(options.tableName)} ${sql.insert(request as any)};
 select * from ${sql(options.tableName)} where ${withSoftDeleteFilter(sql`${sql(idColumn)} = LAST_INSERT_ID()`)};`
               .unprepared.pipe(
                 Effect.map(([, results]) => results as any)
-              ),
-          orElse: () => sql`insert into ${sql(options.tableName)} ${sql.insert(request as any).returning("*")}`
-        })
+              )]
+        ], () => sql`insert into ${sql(options.tableName)} ${sql.insert(request as any).returning("*")}`)
     })
     const insert = (
       insert: S["insert"]["Type"]
@@ -131,24 +130,23 @@ select * from ${sql(options.tableName)} where ${withSoftDeleteFilter(sql`${sql(i
       Request: Model.update,
       Result: Model,
       execute: (request: any) =>
-        sql.onDialectOrElse({
-          mysql: () =>
+        sql.matchDialect([
+          ["mysql", () =>
             sql`update ${sql(options.tableName)} set ${sql.update(request, [idColumn])} where ${
               withSoftDeleteFilter(sql`${sql(idColumn)} = ${request[idColumn]}`)
             };
 select * from ${sql(options.tableName)} where ${withSoftDeleteFilter(sql`${sql(idColumn)} = ${request[idColumn]}`)};`
               .unprepared.pipe(
                 Effect.map(([, results]) => results as any)
-              ),
-          mssql: () =>
+              )],
+          ["mssql", () =>
             sql`update ${sql(options.tableName)} set ${sql.update(request, [idColumn]).returning("*")} where ${
               withSoftDeleteFilter(sql`${sql(idColumn)} = ${request[idColumn]}`)
-            }`,
-          orElse: () =>
-            sql`update ${sql(options.tableName)} set ${sql.update(request, [idColumn])} where ${
-              withSoftDeleteFilter(sql`${sql(idColumn)} = ${request[idColumn]}`)
-            } returning *`
-        })
+            }`]
+        ], () =>
+          sql`update ${sql(options.tableName)} set ${sql.update(request, [idColumn])} where ${
+            withSoftDeleteFilter(sql`${sql(idColumn)} = ${request[idColumn]}`)
+          } returning *`)
     })
     const update = (
       update: S["update"]["Type"]
@@ -301,16 +299,16 @@ export const makeResolvers = <
       Request: Model.insert,
       Result: Model,
       execute: (request: any) =>
-        sql.onDialectOrElse({
-          mysql: () =>
+        sql.matchDialect([
+          ["mysql", () =>
             Effect.forEach(request, (request: any) =>
               sql`insert into ${sql(options.tableName)} ${sql.insert(request)};
 select * from ${sql(options.tableName)} where ${withSoftDeleteFilter(sql`${sql(idColumn)} = LAST_INSERT_ID()`)};`
                 .unprepared.pipe(
                   Effect.map(([, results]) => results[0] as any)
-                ), { concurrency: 10 }),
-          orElse: () => sql`insert into ${sql(options.tableName)} ${sql.insert(request).returning("*")}`
-        })
+                ), { concurrency: 10 })]
+        ], () =>
+          sql`insert into ${sql(options.tableName)} ${sql.insert(request).returning("*")}`)
     }).pipe(
       RequestResolver.withSpan(`${options.spanPrefix}.insertResolver`)
     )

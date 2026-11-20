@@ -154,12 +154,11 @@ export const makeEncodedStorage: (options?: {
       ? Effect.succeed(primaryKey)
       : digest.digestHex(Digest.sha256, encoder.encode(primaryKey))
 
-  const messageIdEnforcesWidth = sql.onDialectOrElse({
-    mssql: () => true,
-    mysql: () => true,
-    pg: () => true,
-    orElse: () => false
-  })
+  const messageIdEnforcesWidth = sql.matchDialect([
+    ["mssql", () => true],
+    ["mysql", () => true],
+    ["pg", () => true]
+  ], () => false)
   // sqlite's TEXT message_id column stored over-length plaintext keys before
   // digests were introduced; those legacy rows need a plaintext fallback read
   const mayHaveLegacyRow = (primaryKey: string): boolean => !messageIdEnforcesWidth && primaryKey.length > 255
@@ -241,11 +240,10 @@ export const makeEncodedStorage: (options?: {
     sequence: reply._tag === "Chunk" ? reply.sequence : null
   })
 
-  const supportsBooleans = sql.onDialectOrElse({
-    mssql: () => false,
-    sqlite: () => false,
-    orElse: () => true
-  })
+  const supportsBooleans = sql.matchDialect([
+    ["mssql", () => false],
+    ["sqlite", () => false]
+  ], () => true)
 
   const messageFromRow = (row: MessageRow & ReplyJoinRow): {
     readonly envelope: Envelope.Encoded
@@ -320,10 +318,9 @@ export const makeEncodedStorage: (options?: {
 
   // Read SQLite IDs as text to avoid rounding on number-returning drivers
   // such as Durable Objects.
-  const idsAsText = sql.onDialectOrElse({
-    sqlite: () => true,
-    orElse: () => false
-  })
+  const idsAsText = sql.matchDialect([
+    ["sqlite", () => true]
+  ], () => false)
   const idAs = (column: string, alias: string) =>
     idsAsText ? `CAST(${column} AS TEXT) AS ${alias}` : `${column} AS ${alias}`
   const replyJoinColumns = "r.kind as reply_kind, r.payload as reply_payload, r.sequence as reply_sequence"
@@ -384,29 +381,30 @@ export const makeEncodedStorage: (options?: {
   const insertEnvelope: (
     row: MessageRow,
     message_id: string
-  ) => Effect.Effect<ReadonlyArray<Row>, SqlError> = sql.onDialectOrElse({
-    pg: () =>
-      insertUnlessExists((row) =>
-        Effect.map(
-          sql`
+  ) => Effect.Effect<ReadonlyArray<Row>, SqlError> = sql.matchDialect(
+    [
+      ["pg", () =>
+        insertUnlessExists((row) =>
+          Effect.map(
+            sql`
             INSERT INTO ${messagesTableSql} ${sql.insert(row)}
             ON CONFLICT (message_id) DO NOTHING
             RETURNING id
           `,
-          (rows) => rows.length > 0
-        )
-      ),
-    mysql: () =>
-      insertUnlessExists((row) =>
-        Effect.map(
-          sql`INSERT IGNORE INTO ${messagesTableSql} ${sql.insert(row)}`.raw,
-          (result: any) => result.affectedRows > 0
-        )
-      ),
-    mssql: () =>
-      insertUnlessExists((row, message_id) =>
-        Effect.map(
-          sql`
+            (rows) => rows.length > 0
+          )
+        )],
+      ["mysql", () =>
+        insertUnlessExists((row) =>
+          Effect.map(
+            sql`INSERT IGNORE INTO ${messagesTableSql} ${sql.insert(row)}`.raw,
+            (result: any) => result.affectedRows > 0
+          )
+        )],
+      ["mssql", () =>
+        insertUnlessExists((row, message_id) =>
+          Effect.map(
+            sql`
             MERGE ${messagesTableSql} WITH (HOLDLOCK) AS target
             USING (SELECT ${message_id} as message_id) AS source
             ON target.message_id = source.message_id
@@ -414,57 +412,50 @@ export const makeEncodedStorage: (options?: {
               INSERT ${sql.insert(row)}
             OUTPUT inserted.id;
           `,
-          (rows) => rows.length > 0
-        )
-      ),
-    // SQLite has a single writer, so no delete can run between read and insert
-    orElse: () => (row, message_id) =>
+            (rows) => rows.length > 0
+          )
+        )]
+    ], // SQLite has a single writer, so no delete can run between read and insert
+    () => (row, message_id) =>
       selectByMessageId(message_id).pipe(
         Effect.tap(sql`INSERT OR IGNORE INTO ${messagesTableSql} ${sql.insert(row)}`),
         sql.withTransaction,
         Effect.retry({ times: 3 })
       )
-  })
+  )
 
-  const tenMinutesAgo = sql.onDialectOrElse({
-    mssql: () => sql.literal(`DATEADD(MINUTE, -10, GETDATE())`),
-    mysql: () => sql.literal(`NOW() - INTERVAL 10 MINUTE`),
-    pg: () => sql.literal(`NOW() - INTERVAL '10 minutes'`),
-    orElse: () => sql.literal(`DATETIME('now', '-10 minute')`)
-  })
-  const sqlNowString = sql.onDialectOrElse({
-    pg: () => "NOW()",
-    mysql: () => "NOW()",
-    mssql: () => "GETDATE()",
-    orElse: () => "CURRENT_TIMESTAMP"
-  })
+  const tenMinutesAgo = sql.matchDialect([
+    ["mssql", () => sql.literal(`DATEADD(MINUTE, -10, GETDATE())`)],
+    ["mysql", () => sql.literal(`NOW() - INTERVAL 10 MINUTE`)],
+    ["pg", () => sql.literal(`NOW() - INTERVAL '10 minutes'`)]
+  ], () => sql.literal(`DATETIME('now', '-10 minute')`))
+  const sqlNowString = sql.matchDialect([
+    ["pg", () => "NOW()"],
+    ["mysql", () => "NOW()"],
+    ["mssql", () => "GETDATE()"]
+  ], () => "CURRENT_TIMESTAMP")
   const sqlNow = sql.literal(sqlNowString)
 
-  const wrapString = sql.onDialectOrElse({
-    mssql: () => (s: string) => `N'${s}'`,
-    orElse: () => (s: string) => `'${s}'`
-  })
-  const forUpdate = sql.onDialectOrElse({
-    mssql: () => sql.literal(""),
-    sqlite: () => sql.literal(""),
-    orElse: () => sql.literal("FOR UPDATE")
-  })
+  const wrapString = sql.matchDialect([
+    ["mssql", () => (s: string) => `N'${s}'`]
+  ], () => (s: string) => `'${s}'`)
+  const forUpdate = sql.matchDialect([
+    ["mssql", () => sql.literal("")],
+    ["sqlite", () => sql.literal("")]
+  ], () => sql.literal("FOR UPDATE"))
   // mssql locks claimed rows with a table hint instead of FOR UPDATE
-  const updateLock = sql.onDialectOrElse({
-    mssql: () => sql.literal("WITH (UPDLOCK)"),
-    orElse: () => sql.literal("")
-  })
+  const updateLock = sql.matchDialect([
+    ["mssql", () => sql.literal("WITH (UPDLOCK)")]
+  ], () => sql.literal(""))
   // Like updateLock and forUpdate, but skips locked rows. REPEATABLEREAD keeps
   // mssql's READPAST valid at any session isolation level.
-  const skipLockedHint = sql.onDialectOrElse({
-    mssql: () => sql.literal("WITH (UPDLOCK, READPAST, REPEATABLEREAD)"),
-    orElse: () => sql.literal("")
-  })
-  const forUpdateSkipLocked = sql.onDialectOrElse({
-    mssql: () => sql.literal(""),
-    sqlite: () => sql.literal(""),
-    orElse: () => sql.literal("FOR UPDATE SKIP LOCKED")
-  })
+  const skipLockedHint = sql.matchDialect([
+    ["mssql", () => sql.literal("WITH (UPDLOCK, READPAST, REPEATABLEREAD)")]
+  ], () => sql.literal(""))
+  const forUpdateSkipLocked = sql.matchDialect([
+    ["mssql", () => sql.literal("")],
+    ["sqlite", () => sql.literal("")]
+  ], () => sql.literal("FOR UPDATE SKIP LOCKED"))
   // Writes to a request's replies lock its row first, in deleteProcessed's
   // order, so they cannot deadlock. An empty result means it was deleted, or
   // does not match the filter.
@@ -472,21 +463,20 @@ export const makeEncodedStorage: (options?: {
     sql`SELECT 1 FROM ${messagesTableSql} ${updateLock} WHERE id = ${requestId} ${filter} ${forUpdate}`
   // mssql can scan the clustered index on small tables and deadlock on other
   // requests' rows, so these statements force the request_id indexes
-  const markAcksProcessed: (requestId: string) => Effect.Effect<unknown, SqlError> = sql.onDialectOrElse({
-    mssql: () => (requestId) =>
+  const markAcksProcessed: (requestId: string) => Effect.Effect<unknown, SqlError> = sql.matchDialect([
+    ["mssql", () => (requestId) =>
       sql`
         UPDATE m SET processed = ${sqlTrue}
         FROM ${messagesTableSql} m WITH (INDEX(${sql(messagesTable + "_request_id_idx")}))
         WHERE m.processed = ${sqlFalse} AND m.request_id = ${requestId} AND m.kind = ${messageKindAckChunk}
-      `,
-    orElse: () => (requestId) =>
-      sql`
+      `]
+  ], () => (requestId) =>
+    sql`
         UPDATE ${messagesTableSql} SET processed = ${sqlTrue}
         WHERE processed = ${sqlFalse} AND request_id = ${requestId} AND kind = ${messageKindAckChunk}
-      `
-  })
-  const deleteRequests: (ids: Fragment) => Effect.Effect<unknown, SqlError> = sql.onDialectOrElse({
-    mssql: () => (ids) =>
+      `)
+  const deleteRequests: (ids: Fragment) => Effect.Effect<unknown, SqlError> = sql.matchDialect([
+    ["mssql", () => (ids) =>
       Effect.andThen(
         sql`
           DELETE r FROM ${repliesTableSql} r WITH (INDEX(${sql(repliesTable + "_request_lookup_idx")}))
@@ -496,11 +486,11 @@ export const makeEncodedStorage: (options?: {
           DELETE m FROM ${messagesTableSql} m WITH (INDEX(${sql(messagesTable + "_request_id_idx")}))
           WHERE m.request_id IN (${ids})
         `
-      ),
+      )],
     // A scanning DELETE locks every row it reads and can deadlock. MySQL
     // ignores FORCE INDEX here, so an optimizer hint keeps it on the index.
     // Servers without hints (before 8.0.20, MariaDB) rely on cleanupIsolation.
-    mysql: () => (ids) =>
+    ["mysql", () => (ids) =>
       Effect.andThen(
         sql`
           DELETE /*+ INDEX(${repliesTableSql} ${sql(repliesTable + "_request_lookup_idx")}) */
@@ -510,32 +500,33 @@ export const makeEncodedStorage: (options?: {
           DELETE /*+ INDEX(${messagesTableSql} ${sql(messagesTable + "_request_id_idx")}) */
           FROM ${messagesTableSql} WHERE request_id IN (${ids})
         `
-      ),
-    orElse: () => (ids) =>
-      Effect.andThen(
-        sql`DELETE FROM ${repliesTableSql} WHERE request_id IN (${ids})`,
-        sql`DELETE FROM ${messagesTableSql} WHERE request_id IN (${ids})`
-      )
-  })
+      )]
+  ], () => (ids) =>
+    Effect.andThen(
+      sql`DELETE FROM ${repliesTableSql} WHERE request_id IN (${ids})`,
+      sql`DELETE FROM ${messagesTableSql} WHERE request_id IN (${ids})`
+    ))
   // Gap locks at MySQL's default REPEATABLE READ let a scanning DELETE
   // deadlock with saveReply. READ COMMITTED takes none, but the server rejects
   // it with binlog_format STATEMENT. A caller's transaction keeps its level.
   const cleanupIsolation: <A, E, R>(self: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R> = sql
-    .onDialectOrElse({
-      mysql: () => Effect.provideService(SqlClient.BeginTransaction, "SET TRANSACTION ISOLATION LEVEL READ COMMITTED"),
-      orElse: () => identity
-    })
+    .matchDialect([
+      [
+        "mysql",
+        () => Effect.provideService(SqlClient.BeginTransaction, "SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+      ]
+    ], () => identity)
   // Locks up to limit eligible requests, skipping locked ones, since waiting
   // can deadlock on MySQL gap locks. Ordering by last_reply_id keeps the
   // query on the retention index.
   const lockDeletable: (
     eligible: Fragment,
     limit: number
-  ) => Effect.Effect<ReadonlyArray<{ id: string | bigint }>, SqlError> = sql.onDialectOrElse({
+  ) => Effect.Effect<ReadonlyArray<{ id: string | bigint }>, SqlError> = sql.matchDialect([
     // A MySQL locking scan also locks ineligible rows, in the opposite order
     // to lockRequest, so find candidates unlocked, then lock them by id and
     // recheck them
-    mysql: () => (eligible, limit) =>
+    ["mysql", () => (eligible, limit) =>
       Effect.flatMap(
         sql<{ id: string | bigint }>`
           SELECT id FROM ${messagesTableSql} WHERE ${eligible} ORDER BY last_reply_id ASC ${limitFragment(limit)}
@@ -546,24 +537,22 @@ export const makeEncodedStorage: (options?: {
             WHERE id IN (${sql.literal(candidates.map((row) => String(row.id)).join(","))}) AND ${eligible}
             FOR UPDATE SKIP LOCKED
           `
-      ),
-    orElse: () => (eligible, limit) =>
-      sql<{ id: string | bigint }>`
+      )]
+  ], () => (eligible, limit) =>
+    sql<{ id: string | bigint }>`
         SELECT ${idColumn} FROM ${messagesTableSql} ${skipLockedHint}
         WHERE ${eligible}
         ORDER BY last_reply_id ASC
         ${limitFragment(limit)}
         ${forUpdateSkipLocked}
-      `
-  })
+      `)
 
   const emptyFragment = sql.literal("")
   // mssql only limits with OFFSET/FETCH, which requires the ORDER BY that
   // both queries already have
-  const limitFragment = sql.onDialectOrElse({
-    mssql: () => (limit: number) => sql.literal(`OFFSET 0 ROWS FETCH NEXT ${Math.floor(limit)} ROWS ONLY`),
-    orElse: () => (limit: number) => sql.literal(`LIMIT ${Math.floor(limit)}`)
-  })
+  const limitFragment = sql.matchDialect([
+    ["mssql", () => (limit: number) => sql.literal(`OFFSET 0 ROWS FETCH NEXT ${Math.floor(limit)} ROWS ONLY`)]
+  ], () => (limit: number) => sql.literal(`LIMIT ${Math.floor(limit)}`))
   const groupAddresses = (addresses: ReadonlyArray<EntityAddress.EntityAddress>) => {
     const byShard = new Map<string, Map<string, Array<EntityAddress.EntityAddress>>>()
     for (const address of addresses) {
@@ -607,8 +596,8 @@ export const makeEncodedStorage: (options?: {
   })
   type UnprocessedFilters = ReturnType<typeof unprocessedFilters>
 
-  const getUnprocessedMessagesForDialect = sql.onDialectOrElse({
-    pg: () => (shardIds: ReadonlyArray<string>, now: number, filters: UnprocessedFilters) =>
+  const getUnprocessedMessagesForDialect = sql.matchDialect([
+    ["pg", () => (shardIds: ReadonlyArray<string>, now: number, filters: UnprocessedFilters) =>
       sql<MessageJoinRow>`
         WITH messages AS (
           UPDATE ${messagesTableSql} m
@@ -635,9 +624,9 @@ export const makeEncodedStorage: (options?: {
           RETURNING ids.*, r.id as reply_reply_id, r.kind as reply_kind, r.payload as reply_payload, r.sequence as reply_sequence
         )
         SELECT * FROM messages ORDER BY rowid ASC
-      `,
-    orElse: () => (shardIds: ReadonlyArray<string>, now: number, filters: UnprocessedFilters) =>
-      sql<MessageJoinRow>`
+      `]
+  ], () => (shardIds: ReadonlyArray<string>, now: number, filters: UnprocessedFilters) =>
+    sql<MessageJoinRow>`
         SELECT ${messageJoinColumns}
         FROM ${messagesTableSql} m ${updateLock}
         LEFT JOIN ${repliesTableSql} r ON r.id = m.last_reply_id
@@ -655,19 +644,18 @@ export const makeEncodedStorage: (options?: {
         ${filters.limit}
         ${forUpdate}
       `.unprepared.pipe(
-        Effect.tap((rows) => {
-          if (rows.length === 0) {
-            return Effect.void
-          }
-          return sql`
+      Effect.tap((rows) => {
+        if (rows.length === 0) {
+          return Effect.void
+        }
+        return sql`
             UPDATE ${messagesTableSql}
             SET last_read = ${sqlNow}
             WHERE id IN (${sql.literal(rows.map((row) => row.id).join(","))})
           `.unprepared
-        }),
-        sql.withTransaction
-      )
-  })
+      }),
+      sql.withTransaction
+    ))
   const getUnprocessedMessages = (
     shardIds: ReadonlyArray<string>,
     now: number,
@@ -677,9 +665,9 @@ export const makeEncodedStorage: (options?: {
       ? Effect.succeed([])
       : getUnprocessedMessagesForDialect(shardIds, now, unprocessedFilters(options))
 
-  const resetUnprocessed = sql.onDialectOrElse({
+  const resetUnprocessed = sql.matchDialect([
     // Match the claim query's lock order to avoid deadlocks during resets.
-    pg: () => (filter: Fragment) =>
+    ["pg", () => (filter: Fragment) =>
       sql`
       WITH messages AS (
         SELECT id FROM ${messagesTableSql}
@@ -690,14 +678,13 @@ export const makeEncodedStorage: (options?: {
       UPDATE ${messagesTableSql}
       SET last_read = NULL
       WHERE id IN (SELECT id FROM messages)
-    `,
-    orElse: () => (filter: Fragment) =>
-      sql`
+    `]
+  ], () => (filter: Fragment) =>
+    sql`
       UPDATE ${messagesTableSql}
       SET last_read = NULL
       WHERE processed = ${sqlFalse} AND ${filter}
-    `
-  })
+    `)
 
   const encoded: MessageStorage.Encoded = {
     saveEnvelope: ({ deliverAt, envelope, primaryKey }) =>
@@ -1055,8 +1042,8 @@ export const migrations = (options?: {
 
       // mssql UNIQUE constraints treat NULLs as equal, so nullable keys use
       // filtered unique indexes instead
-      yield* sql.onDialectOrElse({
-        mssql: () =>
+      yield* sql.matchDialect([
+        ["mssql", () =>
           sql`
             IF OBJECT_ID(N'${messagesTableSql}', N'U') IS NULL
             CREATE TABLE ${messagesTableSql} (
@@ -1081,8 +1068,8 @@ export const migrations = (options?: {
               deliver_at BIGINT,
               INDEX ${sql(messagesTable + "_message_id_idx")} UNIQUE (message_id) WHERE message_id IS NOT NULL
             )
-          `,
-        mysql: () =>
+          `],
+        ["mysql", () =>
           sql`
             CREATE TABLE IF NOT EXISTS ${messagesTableSql} (
               id BIGINT NOT NULL,
@@ -1107,8 +1094,8 @@ export const migrations = (options?: {
               UNIQUE (id),
               UNIQUE (message_id)
             )
-          `,
-        pg: () =>
+          `],
+        ["pg", () =>
           sql`
             CREATE TABLE IF NOT EXISTS ${messagesTableSql} (
               id BIGINT PRIMARY KEY,
@@ -1132,10 +1119,10 @@ export const migrations = (options?: {
               deliver_at BIGINT,
               UNIQUE (message_id)
             )
-          `,
-        orElse: () =>
-          // sqlite
-          sql`
+          `]
+      ], () =>
+        // sqlite
+        sql`
             CREATE TABLE IF NOT EXISTS ${messagesTableSql} (
               id INTEGER PRIMARY KEY,
               message_id TEXT,
@@ -1157,14 +1144,13 @@ export const migrations = (options?: {
               deliver_at INTEGER,
               UNIQUE (message_id)
             )
-          `
-      })
+          `)
 
       // Add message indexes optimized for the specific query patterns
       const shardLookupIndex = `${messagesTable}_shard_idx`
       const requestIdLookupIndex = `${messagesTable}_request_id_idx`
-      yield* sql.onDialectOrElse({
-        mssql: () =>
+      yield* sql.matchDialect([
+        ["mssql", () =>
           sql`
             IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = ${shardLookupIndex} AND object_id = OBJECT_ID(${messagesTable}))
             CREATE INDEX ${sql(shardLookupIndex)} 
@@ -1173,41 +1159,43 @@ export const migrations = (options?: {
             IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = ${requestIdLookupIndex} AND object_id = OBJECT_ID(${messagesTable}))
             CREATE INDEX ${sql(requestIdLookupIndex)}
             ON ${messagesTableSql} (request_id);
-          `,
-        mysql: () =>
+          `],
+        ["mysql", () =>
           sql`
             CREATE INDEX ${sql(shardLookupIndex)}
             ON ${messagesTableSql} (shard_id, processed, last_read, deliver_at);
 
             CREATE INDEX ${sql(requestIdLookupIndex)}
             ON ${messagesTableSql} (request_id);
-          `.unprepared.pipe(Effect.ignore),
-        pg: Effect.fnUntraced(function*() {
-          yield* sql`
+          `.unprepared.pipe(Effect.ignore)],
+        [
+          "pg",
+          Effect.fnUntraced(function*() {
+            yield* sql`
               CREATE INDEX IF NOT EXISTS ${sql(shardLookupIndex)}
               ON ${messagesTableSql} (shard_id, processed, last_read, deliver_at)
             `
-          yield* sql`
+            yield* sql`
               CREATE INDEX IF NOT EXISTS ${sql(requestIdLookupIndex)}
               ON ${messagesTableSql} (request_id)
             `
-        }),
-        orElse: () =>
-          // sqlite
-          Effect.all([
-            sql`
+          })
+        ]
+      ], () =>
+        // sqlite
+        Effect.all([
+          sql`
               CREATE INDEX IF NOT EXISTS ${sql(shardLookupIndex)}
               ON ${messagesTableSql} (shard_id, processed, last_read, deliver_at)
             `,
-            sql`
+          sql`
               CREATE INDEX IF NOT EXISTS ${sql(requestIdLookupIndex)}
               ON ${messagesTableSql} (request_id)
             `
-          ]).pipe(sql.withTransaction)
-      })
+        ]).pipe(sql.withTransaction))
 
-      yield* sql.onDialectOrElse({
-        mssql: () =>
+      yield* sql.matchDialect([
+        ["mssql", () =>
           sql`
             IF OBJECT_ID(N'${repliesTableSql}', N'U') IS NULL
             CREATE TABLE ${repliesTableSql} (
@@ -1221,8 +1209,8 @@ export const migrations = (options?: {
               INDEX ${sql(repliesTable + "_one_exit")} UNIQUE (request_id, kind) WHERE kind IS NOT NULL,
               INDEX ${sql(repliesTable + "_sequence")} UNIQUE (request_id, sequence) WHERE sequence IS NOT NULL
             )
-          `,
-        mysql: () =>
+          `],
+        ["mysql", () =>
           sql`
             CREATE TABLE IF NOT EXISTS ${repliesTableSql} (
               id BIGINT NOT NULL,
@@ -1236,8 +1224,8 @@ export const migrations = (options?: {
               UNIQUE (request_id, kind),
               UNIQUE (request_id, sequence)
             )
-          `,
-        pg: () =>
+          `],
+        ["pg", () =>
           sql`
             CREATE TABLE IF NOT EXISTS ${repliesTableSql} (
               id BIGINT PRIMARY KEY,
@@ -1250,10 +1238,10 @@ export const migrations = (options?: {
               UNIQUE (request_id, kind),
               UNIQUE (request_id, sequence)
             )
-          `,
-        orElse: () =>
-          // sqlite
-          sql`
+          `]
+      ], () =>
+        // sqlite
+        sql`
             CREATE TABLE IF NOT EXISTS ${repliesTableSql} (
               id INTEGER PRIMARY KEY,
               kind INTEGER,
@@ -1264,72 +1252,68 @@ export const migrations = (options?: {
               UNIQUE (request_id, kind),
               UNIQUE (request_id, sequence)
             )
-          `
-      })
+          `)
 
       // Add reply indexes optimized for request_id lookups
       const replyLookupIndex = `${repliesTable}_request_lookup_idx`
-      yield* sql.onDialectOrElse({
-        mssql: () =>
+      yield* sql.matchDialect([
+        ["mssql", () =>
           sql`
             IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = ${replyLookupIndex} AND object_id = OBJECT_ID(${repliesTable}))
             CREATE INDEX ${sql(replyLookupIndex)}
             ON ${repliesTableSql} (request_id, kind, acked);
-          `,
-        mysql: () =>
+          `],
+        ["mysql", () =>
           sql`
             CREATE INDEX ${sql(replyLookupIndex)}
             ON ${repliesTableSql} (request_id, kind, acked);
-          `.unprepared.pipe(Effect.ignore),
-        pg: () =>
+          `.unprepared.pipe(Effect.ignore)],
+        ["pg", () =>
           sql`
             CREATE INDEX IF NOT EXISTS ${sql(replyLookupIndex)}
             ON ${repliesTableSql} (request_id, kind, acked);
-          `,
-        orElse: () =>
-          // sqlite
-          sql`
+          `]
+      ], () =>
+        // sqlite
+        sql`
             CREATE INDEX IF NOT EXISTS ${sql(replyLookupIndex)}
             ON ${repliesTableSql} (request_id, kind, acked);
-          `
-      })
+          `)
     }),
     "0002_entity_type_size": Effect.gen(function*() {
       const sql = (yield* SqlClient.SqlClient).withoutTransforms()
       const messagesTableSql = sql(messagesTable)
 
       // resize entity_type to 150 characters
-      yield* sql.onDialectOrElse({
-        mssql: () =>
+      yield* sql.matchDialect([
+        ["mssql", () =>
           sql`
             ALTER TABLE ${messagesTableSql} ALTER COLUMN entity_type VARCHAR(150) NOT NULL;
-          `,
-        mysql: () =>
+          `],
+        ["mysql", () =>
           sql`
             ALTER TABLE ${messagesTableSql} MODIFY entity_type VARCHAR(150) NOT NULL;
-          `.unprepared.pipe(Effect.ignore),
-        pg: () =>
+          `.unprepared.pipe(Effect.ignore)],
+        ["pg", () =>
           sql`
             ALTER TABLE ${messagesTableSql} ALTER COLUMN entity_type TYPE VARCHAR(150);
-          `,
-        orElse: () =>
-          // sqlite
-          Effect.void
-      })
+          `]
+      ], () =>
+        // sqlite
+        Effect.void)
     }),
     "0003_pg_messages_rowid_index": Effect.gen(function*() {
       const sql = (yield* SqlClient.SqlClient).withoutTransforms()
       const messagesTableSql = sql(messagesTable)
       const rowIdIndex = `${messagesTable}_rowid_idx`
 
-      yield* sql.onDialectOrElse({
-        pg: () =>
+      yield* sql.matchDialect([
+        ["pg", () =>
           sql`
             CREATE INDEX IF NOT EXISTS ${sql(rowIdIndex)}
             ON ${messagesTableSql} (rowid)
-          `,
-        orElse: () => Effect.void
-      })
+          `]
+      ], () => Effect.void)
     }),
 
     // 0001 looked mssql indexes up by name alone, so a same-named index on
@@ -1341,15 +1325,14 @@ export const migrations = (options?: {
           IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = ${index} AND object_id = OBJECT_ID(${table}))
           CREATE INDEX ${sql(index)} ON ${sql(table)} (${sql.literal(columns)})
         `
-      yield* sql.onDialectOrElse({
-        mssql: () =>
+      yield* sql.matchDialect([
+        ["mssql", () =>
           Effect.all([
             ensureIndex(`${messagesTable}_shard_idx`, messagesTable, "shard_id, processed, last_read, deliver_at"),
             ensureIndex(`${messagesTable}_request_id_idx`, messagesTable, "request_id"),
             ensureIndex(`${repliesTable}_request_lookup_idx`, repliesTable, "request_id, kind, acked")
-          ], { discard: true }),
-        orElse: () => Effect.void
-      })
+          ], { discard: true })]
+      ], () => Effect.void)
     }),
 
     // Serves deleteProcessed's lookup by entity type and final reply id
@@ -1358,13 +1341,13 @@ export const migrations = (options?: {
       const messagesTableSql = sql(messagesTable)
       const retentionIndex = `${messagesTable}_retention_idx`
       const columns = sql.literal("entity_type, processed, last_reply_id")
-      yield* sql.onDialectOrElse({
-        mssql: () =>
+      yield* sql.matchDialect([
+        ["mssql", () =>
           sql`
             IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = ${retentionIndex} AND object_id = OBJECT_ID(${messagesTable}))
             CREATE INDEX ${sql(retentionIndex)} ON ${messagesTableSql} (${columns})
-          `,
-        mysql: () =>
+          `],
+        ["mysql", () =>
           sql`
             SELECT 1 FROM information_schema.statistics
             WHERE table_schema = DATABASE() AND table_name = ${messagesTable} AND index_name = ${retentionIndex}
@@ -1374,9 +1357,8 @@ export const migrations = (options?: {
                 ? Effect.void
                 : sql`CREATE INDEX ${sql(retentionIndex)} ON ${messagesTableSql} (${columns})`.unprepared
             )
-          ),
-        orElse: () => sql`CREATE INDEX IF NOT EXISTS ${sql(retentionIndex)} ON ${messagesTableSql} (${columns})`
-      })
+          )]
+      ], () => sql`CREATE INDEX IF NOT EXISTS ${sql(retentionIndex)} ON ${messagesTableSql} (${columns})`)
     })
   })
 }

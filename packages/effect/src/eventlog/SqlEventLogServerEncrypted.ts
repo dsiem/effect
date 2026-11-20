@@ -104,105 +104,101 @@ export const makeStorage = (options?: {
     const remoteIdTableSql = sql(remoteIdTable)
     const sessionAuthBindingsTableSql = sql(sessionAuthBindingsTable)
 
-    yield* sql.onDialectOrElse({
-      pg: () =>
+    yield* sql.matchDialect([
+      ["pg", () =>
         sql`
           CREATE TABLE IF NOT EXISTS ${remoteIdTableSql} (
             remote_id BYTEA PRIMARY KEY
-          )`,
-      mysql: () =>
+          )`],
+      ["mysql", () =>
         sql`
           CREATE TABLE IF NOT EXISTS ${remoteIdTableSql} (
             remote_id BINARY(16) PRIMARY KEY
-          )`,
-      mssql: () =>
+          )`],
+      ["mssql", () =>
         sql`
           IF OBJECT_ID(${remoteIdTable}, N'U') IS NULL
           CREATE TABLE ${remoteIdTableSql} (
             remote_id VARBINARY(16) PRIMARY KEY
-          )`,
-      orElse: () =>
-        sql`
+          )`]
+    ], () =>
+      sql`
           CREATE TABLE IF NOT EXISTS ${remoteIdTableSql} (
             remote_id BLOB PRIMARY KEY
-          )`
-    })
+          )`)
 
-    yield* sql.onDialectOrElse({
-      pg: () =>
+    yield* sql.matchDialect([
+      ["pg", () =>
         sql`
           CREATE TABLE IF NOT EXISTS ${sessionAuthBindingsTableSql} (
             public_key TEXT PRIMARY KEY,
             signing_public_key BYTEA NOT NULL
-          )`,
-      mysql: () =>
+          )`],
+      ["mysql", () =>
         sql`
           CREATE TABLE IF NOT EXISTS ${sessionAuthBindingsTableSql} (
             public_key VARCHAR(191) PRIMARY KEY,
             signing_public_key BINARY(32) NOT NULL
-          )`,
-      mssql: () =>
+          )`],
+      ["mssql", () =>
         sql`
           IF OBJECT_ID(${sessionAuthBindingsTable}, N'U') IS NULL
           CREATE TABLE ${sessionAuthBindingsTableSql} (
             public_key NVARCHAR(191) PRIMARY KEY,
             signing_public_key VARBINARY(32) NOT NULL
-          )`,
-      orElse: () =>
-        sql`
+          )`]
+    ], () =>
+      sql`
           CREATE TABLE IF NOT EXISTS ${sessionAuthBindingsTableSql} (
             public_key TEXT PRIMARY KEY,
             signing_public_key BLOB NOT NULL
-          )`
-    })
+          )`)
 
-    const types = sql.onDialectOrElse({
-      pg: () => ({ id: "TEXT", int: "INTEGER", bigint: "BIGINT", bytes: "BYTEA", entryId: "BYTEA", iv: "BYTEA" }),
-      mysql: () => ({
+    const types = sql.matchDialect([
+      ["pg", () => ({ id: "TEXT", int: "INTEGER", bigint: "BIGINT", bytes: "BYTEA", entryId: "BYTEA", iv: "BYTEA" })],
+      ["mysql", () => ({
         id: "VARCHAR(36)",
         int: "INT",
         bigint: "BIGINT",
         bytes: "LONGBLOB",
         entryId: "BINARY(16)",
         iv: "BINARY(12)"
-      }),
-      mssql: () => ({
+      })],
+      ["mssql", () => ({
         id: "NVARCHAR(36)",
         int: "INT",
         bigint: "BIGINT",
         bytes: "VARBINARY(MAX)",
         entryId: "VARBINARY(16)",
         iv: "VARBINARY(12)"
-      }),
-      orElse: () => ({ id: "TEXT", int: "INTEGER", bigint: "INTEGER", bytes: "BLOB", entryId: "BLOB", iv: "BLOB" })
-    })
+      })]
+    ], () => ({ id: "TEXT", int: "INTEGER", bigint: "INTEGER", bytes: "BLOB", entryId: "BLOB", iv: "BLOB" }))
     // Two instances can open the same table at once, and PostgreSQL and SQL
     // Server can fail the loser of a concurrent create, so creation retries.
     // SQL Server declares its indexes inline, as concurrent CREATE INDEX
     // statements can deadlock.
     const createTable = (name: string, columns: string, indexes: ReadonlyArray<string> = []) =>
-      sql.onDialectOrElse({
-        mysql: () => {
+      sql.matchDialect([
+        ["mysql", () => {
           const definitions = [columns, ...indexes.map((index) => `INDEX (${index})`)].join(", ")
           return Effect.asVoid(sql`CREATE TABLE IF NOT EXISTS ${sql(name)} (${sql.literal(definitions)})`)
-        },
-        mssql: () => {
+        }],
+        ["mssql", () => {
           const definitions = sql.csv([
             sql.literal(columns),
             ...indexes.map((index, i) => sql`INDEX ${sql(`${name}_i${i}`)} NONCLUSTERED (${sql.literal(index)})`)
           ])
           return Effect.asVoid(sql`IF OBJECT_ID(${name}, N'U') IS NULL CREATE TABLE ${sql(name)} (${definitions})`)
-        },
-        orElse: () =>
-          sql`CREATE TABLE IF NOT EXISTS ${sql(name)} (${sql.literal(columns)})`.pipe(
-            Effect.andThen(Effect.forEach(
-              indexes,
-              (index, i) =>
-                sql`CREATE INDEX IF NOT EXISTS ${sql(`${name}_i${i}`)} ON ${sql(name)} (${sql.literal(index)})`,
-              { discard: true }
-            ))
-          )
-      }).pipe(Effect.retry({ times: 3 }))
+        }]
+      ], () =>
+        sql`CREATE TABLE IF NOT EXISTS ${sql(name)} (${sql.literal(columns)})`.pipe(
+          Effect.andThen(Effect.forEach(
+            indexes,
+            (index, i) =>
+              sql`CREATE INDEX IF NOT EXISTS ${sql(`${name}_i${i}`)} ON ${sql(name)} (${sql.literal(index)})`,
+            { discard: true }
+          ))
+        )).pipe(Effect.retry({ times: 3 }))
 
     const storesTable = `${tablePrefix}_compaction_stores`
     const bucketsTable = `${tablePrefix}_compaction_buckets`
@@ -298,8 +294,8 @@ export const makeStorage = (options?: {
       const { idsTableSql, tableSql } = tables
       const indexSql = sql(`${table}_last_sequence`)
 
-      yield* sql.onDialectOrElse({
-        pg: () =>
+      yield* sql.matchDialect([
+        ["pg", () =>
           sql`
               CREATE TABLE IF NOT EXISTS ${tableSql} (
                 sequence INTEGER PRIMARY KEY,
@@ -314,8 +310,8 @@ export const makeStorage = (options?: {
                 entry_id BYTEA PRIMARY KEY,
                 sequence INTEGER NOT NULL
               )`)
-          ),
-        mysql: () =>
+          )],
+        ["mysql", () =>
           sql`
               CREATE TABLE IF NOT EXISTS ${tableSql} (
                 sequence INT PRIMARY KEY,
@@ -330,8 +326,8 @@ export const makeStorage = (options?: {
                 entry_id BINARY(16) PRIMARY KEY,
                 sequence INT NOT NULL
               )`)
-          ),
-        mssql: () =>
+          )],
+        ["mssql", () =>
           sql`
               IF OBJECT_ID(${table}, N'U') IS NULL
               CREATE TABLE ${tableSql} (
@@ -348,9 +344,9 @@ export const makeStorage = (options?: {
                 entry_id VARBINARY(16) PRIMARY KEY,
                 sequence INT NOT NULL
               )`)
-          ),
-        orElse: () =>
-          sql`
+          )]
+      ], () =>
+        sql`
               CREATE TABLE IF NOT EXISTS ${tableSql} (
                 sequence INTEGER PRIMARY KEY,
                 last_sequence INTEGER NOT NULL,
@@ -358,14 +354,13 @@ export const makeStorage = (options?: {
                 entry_ids BLOB NOT NULL,
                 encrypted_batch BLOB NOT NULL
               )`.pipe(
-            Effect.andThen(sql`CREATE INDEX IF NOT EXISTS ${indexSql} ON ${tableSql} (last_sequence)`),
-            Effect.andThen(sql`
+          Effect.andThen(sql`CREATE INDEX IF NOT EXISTS ${indexSql} ON ${tableSql} (last_sequence)`),
+          Effect.andThen(sql`
               CREATE TABLE IF NOT EXISTS ${idsTableSql} (
                 entry_id BLOB PRIMARY KEY,
                 sequence INTEGER NOT NULL
               )`)
-          )
-      }).pipe(Effect.retry({ times: 3 }))
+        )).pipe(Effect.retry({ times: 3 }))
       // Staged and committed snapshot batches. `sequence` and
       // `last_sequence` stay null until commit.
       yield* createTable(
@@ -417,12 +412,12 @@ export const makeStorage = (options?: {
       rows: Arr.NonEmptyReadonlyArray<Record<string, unknown>>,
       keys: ReadonlyArray<string>
     ) =>
-      sql.onDialectOrElse({
-        mysql: () =>
+      sql.matchDialect([
+        ["mysql", () =>
           sql`INSERT IGNORE INTO ${tableSql} ${sql.insert(rows)}`.raw.pipe(
             Effect.map((result) => (result as { affectedRows: number }).affectedRows)
-          ),
-        mssql: () => {
+          )],
+        ["mssql", () => {
           const columns = Object.keys(rows[0])
           const values = sql.join(", ", false)(
             rows.map((row) => sql`(${sql.join(", ", false)(columns.map((column) => sql`${row[column]}`))})`)
@@ -436,25 +431,24 @@ export const makeStorage = (options?: {
               VALUES (${sql.literal(columns.map((column) => `source.${column}`).join(", "))})
             OUTPUT inserted.${sql.literal(keys[0])};
           `.pipe(Effect.map((inserted) => inserted.length))
-        },
-        orElse: () =>
-          sql`INSERT INTO ${tableSql} ${sql.insert(rows)} ON CONFLICT DO NOTHING RETURNING ${sql(keys[0])}`.pipe(
-            Effect.map((inserted) => inserted.length)
-          )
-      })
+        }]
+      ], () =>
+        sql`INSERT INTO ${tableSql} ${sql.insert(rows)} ON CONFLICT DO NOTHING RETURNING ${sql(keys[0])}`.pipe(
+          Effect.map((inserted) => inserted.length)
+        ))
 
     const upsertBucket = (scope: string, hour: number, lastSequence: number) =>
-      sql.onDialectOrElse({
-        pg: () =>
+      sql.matchDialect([
+        ["pg", () =>
           sql`
             INSERT INTO ${bucketsSql} (scope, bucket_hour, last_sequence) VALUES (${scope}, ${hour}, ${lastSequence})
             ON CONFLICT (scope, bucket_hour)
-            DO UPDATE SET last_sequence = GREATEST(${bucketsSql}.last_sequence, EXCLUDED.last_sequence)`,
-        mysql: () =>
+            DO UPDATE SET last_sequence = GREATEST(${bucketsSql}.last_sequence, EXCLUDED.last_sequence)`],
+        ["mysql", () =>
           sql`
             INSERT INTO ${bucketsSql} (scope, bucket_hour, last_sequence) VALUES (${scope}, ${hour}, ${lastSequence})
-            ON DUPLICATE KEY UPDATE last_sequence = GREATEST(last_sequence, VALUES(last_sequence))`,
-        mssql: () =>
+            ON DUPLICATE KEY UPDATE last_sequence = GREATEST(last_sequence, VALUES(last_sequence))`],
+        ["mssql", () =>
           sql`
             MERGE ${bucketsSql} WITH (HOLDLOCK) AS target
             USING (VALUES (${scope}, ${hour}, ${lastSequence})) AS source (scope, bucket_hour, last_sequence)
@@ -463,13 +457,12 @@ export const makeStorage = (options?: {
               UPDATE SET last_sequence = source.last_sequence
             WHEN NOT MATCHED THEN
               INSERT (scope, bucket_hour, last_sequence)
-              VALUES (source.scope, source.bucket_hour, source.last_sequence);`,
-        orElse: () =>
-          sql`
+              VALUES (source.scope, source.bucket_hour, source.last_sequence);`]
+      ], () =>
+        sql`
             INSERT INTO ${bucketsSql} (scope, bucket_hour, last_sequence) VALUES (${scope}, ${hour}, ${lastSequence})
             ON CONFLICT (scope, bucket_hour)
-            DO UPDATE SET last_sequence = MAX(${bucketsSql}.last_sequence, excluded.last_sequence)`
-      })
+            DO UPDATE SET last_sequence = MAX(${bucketsSql}.last_sequence, excluded.last_sequence)`)
 
     const maxLastSequence = (tableSql: Statement.Identifier) =>
       Effect.map(
@@ -532,15 +525,13 @@ export const makeStorage = (options?: {
       )
     // Row locks held for the rest of the transaction. SQLite transactions take
     // the database write lock instead.
-    const lockHint = sql.onDialectOrElse({
-      mssql: () => sql.literal("WITH (UPDLOCK, ROWLOCK, HOLDLOCK)"),
-      orElse: () => sql.literal("")
-    })
-    const forUpdate = sql.onDialectOrElse({
-      pg: () => sql.literal("FOR UPDATE"),
-      mysql: () => sql.literal("FOR UPDATE"),
-      orElse: () => sql.literal("")
-    })
+    const lockHint = sql.matchDialect([
+      ["mssql", () => sql.literal("WITH (UPDLOCK, ROWLOCK, HOLDLOCK)")]
+    ], () => sql.literal(""))
+    const forUpdate = sql.matchDialect([
+      ["pg", () => sql.literal("FOR UPDATE")],
+      ["mysql", () => sql.literal("FOR UPDATE")]
+    ], () => sql.literal(""))
     const noClause = sql.literal("")
     // Locks the store row for the rest of the transaction. Lock order is store
     // row, then stage row, then snapshot rows.
@@ -596,8 +587,8 @@ export const makeStorage = (options?: {
 
     // The clauses that cap a statement at `rows` rows, for `SELECT ${top} ... ${limit}`.
     const rowCap = (rows: number) => ({
-      top: sql.onDialectOrElse({ mssql: () => sql.literal(`TOP (${rows})`), orElse: () => noClause }),
-      limit: sql.onDialectOrElse({ mssql: () => noClause, orElse: () => sql.literal(`LIMIT ${rows}`) })
+      top: sql.matchDialect([["mssql", () => sql.literal(`TOP (${rows})`)]], () => noClause),
+      limit: sql.matchDialect([["mssql", () => noClause]], () => sql.literal(`LIMIT ${rows}`))
     })
     const { limit, top } = rowCap(pageSize)
     const { limit: chunkLimit, top: chunkTop } = rowCap(pruneChunkRows)
@@ -1156,12 +1147,13 @@ export const makeStorage = (options?: {
         return {
           lease: { owner, activeActivation: store.activeActivation },
           sets: Array.from(
-            new Set(pruned.flatMap((activation) =>
-              activation.batchSet === undefined || keptSets.has(activation.batchSet) ? [] : [activation.batchSet]
-            ))
+            new Set(
+              pruned.flatMap((activation) =>
+                activation.batchSet === undefined || keptSets.has(activation.batchSet) ? [] : [activation.batchSet]
+              )
+            )
           ),
-          keptBase: kept.reduce((base, activation) =>
-            Math.min(base, activation.base), Infinity),
+          keptBase: kept.reduce((base, activation) => Math.min(base, activation.base), Infinity),
           prunedThrough: store.prunedThrough
         }
       }))

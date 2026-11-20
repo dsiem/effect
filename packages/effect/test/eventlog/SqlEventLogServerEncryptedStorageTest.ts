@@ -26,15 +26,14 @@ const ids = (batches: ReadonlyArray<{ readonly entryIds: ReadonlyArray<EventJour
 // Waits until another connection is blocked on a lock held by an open transaction.
 const awaitLockWait = Effect.gen(function*() {
   const sql = yield* SqlClient.SqlClient
-  const waiting = sql.onDialectOrElse({
-    pg: () =>
+  const waiting = sql.matchDialect([
+    ["pg", () =>
       sql<{ n: number }>`
         SELECT COUNT(*)::int AS n FROM pg_stat_activity
-        WHERE wait_event_type = 'Lock' AND datname = current_database()`,
-    mysql: () => sql<{ n: number }>`SELECT COUNT(*) AS n FROM performance_schema.data_lock_waits`,
-    mssql: () => sql<{ n: number }>`SELECT COUNT(*) AS n FROM sys.dm_exec_requests WHERE blocking_session_id <> 0`,
-    orElse: () => Effect.die("competing writers need a server dialect")
-  })
+        WHERE wait_event_type = 'Lock' AND datname = current_database()`],
+    ["mysql", () => sql<{ n: number }>`SELECT COUNT(*) AS n FROM performance_schema.data_lock_waits`],
+    ["mssql", () => sql<{ n: number }>`SELECT COUNT(*) AS n FROM sys.dm_exec_requests WHERE blocking_session_id <> 0`]
+  ], () => Effect.die("competing writers need a server dialect"))
   for (let attempt = 0; attempt < 500; attempt++) {
     const [row] = yield* waiting
     if (Number(row.n) > 0) return
@@ -168,8 +167,8 @@ const createLegacyTables = Effect.fnUntraced(function*(table: string) {
   const tableSql = sql(table)
   const idsTableSql = sql(`${table}_ids`)
   const indexSql = sql(`${table}_last_sequence`)
-  yield* sql.onDialectOrElse({
-    pg: () =>
+  yield* sql.matchDialect([
+    ["pg", () =>
       sql`
         CREATE TABLE ${tableSql} (
           sequence INTEGER PRIMARY KEY,
@@ -180,8 +179,8 @@ const createLegacyTables = Effect.fnUntraced(function*(table: string) {
         )`.pipe(
         Effect.andThen(sql`CREATE INDEX ${indexSql} ON ${tableSql} (last_sequence)`),
         Effect.andThen(sql`CREATE TABLE ${idsTableSql} (entry_id BYTEA PRIMARY KEY, sequence INTEGER NOT NULL)`)
-      ),
-    mysql: () =>
+      )],
+    ["mysql", () =>
       sql`
         CREATE TABLE ${tableSql} (
           sequence INT PRIMARY KEY,
@@ -192,8 +191,8 @@ const createLegacyTables = Effect.fnUntraced(function*(table: string) {
           INDEX (last_sequence)
         )`.pipe(
         Effect.andThen(sql`CREATE TABLE ${idsTableSql} (entry_id BINARY(16) PRIMARY KEY, sequence INT NOT NULL)`)
-      ),
-    mssql: () =>
+      )],
+    ["mssql", () =>
       sql`
         CREATE TABLE ${tableSql} (
           sequence INT PRIMARY KEY,
@@ -204,9 +203,9 @@ const createLegacyTables = Effect.fnUntraced(function*(table: string) {
           INDEX ${indexSql} NONCLUSTERED (last_sequence)
         )`.pipe(
         Effect.andThen(sql`CREATE TABLE ${idsTableSql} (entry_id VARBINARY(16) PRIMARY KEY, sequence INT NOT NULL)`)
-      ),
-    orElse: () =>
-      sql`
+      )]
+  ], () =>
+    sql`
         CREATE TABLE ${tableSql} (
           sequence INTEGER PRIMARY KEY,
           last_sequence INTEGER NOT NULL,
@@ -214,10 +213,9 @@ const createLegacyTables = Effect.fnUntraced(function*(table: string) {
           entry_ids BLOB NOT NULL,
           encrypted_batch BLOB NOT NULL
         )`.pipe(
-        Effect.andThen(sql`CREATE INDEX ${indexSql} ON ${tableSql} (last_sequence)`),
-        Effect.andThen(sql`CREATE TABLE ${idsTableSql} (entry_id BLOB PRIMARY KEY, sequence INTEGER NOT NULL)`)
-      )
-  })
+      Effect.andThen(sql`CREATE INDEX ${indexSql} ON ${tableSql} (last_sequence)`),
+      Effect.andThen(sql`CREATE TABLE ${idsTableSql} (entry_id BLOB PRIMARY KEY, sequence INTEGER NOT NULL)`)
+    ))
 })
 
 // Writes a batch of new ids as an instance from before compaction does, at

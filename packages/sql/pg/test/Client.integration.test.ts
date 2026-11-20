@@ -250,26 +250,11 @@ it.layer(PgContainer.layerClient, { timeout: "30 seconds" })("PgClient", (it) =>
       assert.lengthOf(params, 3)
     }))
 
-  it.effect("onDialect", () =>
+  it.effect("matches the PostgreSQL dialect", () =>
     Effect.gen(function*() {
       const sql = yield* PgClient.PgClient
-      assert.strictEqual(
-        sql.onDialect({
-          sqlite: () => "A",
-          pg: () => "B",
-          mysql: () => "C",
-          mssql: () => "D",
-          clickhouse: () => "E"
-        }),
-        "B"
-      )
-      assert.strictEqual(
-        sql.onDialectOrElse({
-          orElse: () => "A",
-          pg: () => "B"
-        }),
-        "B"
-      )
+      assert.strictEqual(sql.dialect, "pg")
+      assert.strictEqual(sql.matchDialect([["pg", () => "postgres"]], () => "fallback"), "postgres")
     }))
 
   it.effect("identifier transform", () =>
